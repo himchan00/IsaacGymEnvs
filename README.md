@@ -1,3 +1,19 @@
+# **Isaac Gym Simulation Practice Repository**
+
+Before getting started, please refer to the original README for installation instructions and basic tutorials.
+
+To run the trajectory tracking test, execute the following command:
+```bash
+python test.py
+```
+
+This repository includes a toy environment for control practice.  
+- The environment code is located in **`isaacgymenvs/tasks/franka_toy.py`**.  
+- The corresponding configuration file can be found in **`isaacgymenvs/cfg/task/FrankaToy.yaml`**.  
+
+You can modify **`env.controlType`** in the config file to test different controllers.  
+(Currently, only **'osc'** and **'admittance'** are implemented.)
+
 # Isaac Gym Benchmark Environments
 
 [Website](https://developer.nvidia.com/isaac-gym) | [Technical Paper](https://arxiv.org/abs/2108.10470) | [Videos](https://sites.google.com/view/isaacgym-nvidia)
