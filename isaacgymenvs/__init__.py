@@ -5,11 +5,16 @@ from omegaconf import DictConfig, OmegaConf
 from isaacgymenvs.utils.reformat import omegaconf_to_dict
 
 
-OmegaConf.register_new_resolver('eq', lambda x, y: x.lower()==y.lower())
-OmegaConf.register_new_resolver('contains', lambda x, y: x.lower() in y.lower())
-OmegaConf.register_new_resolver('if', lambda pred, a, b: a if pred else b)
-OmegaConf.register_new_resolver('resolve_default', lambda default, arg: default if arg=='' else arg)
-
+# Check if the resolver is already registered  
+# This prevents errors when __init__.py is imported multiple times  
+if not OmegaConf.has_resolver('eq'):
+    OmegaConf.register_new_resolver('eq', lambda x, y: x.lower()==y.lower())
+if not OmegaConf.has_resolver('contains'):
+    OmegaConf.register_new_resolver('contains', lambda x, y: x.lower() in y.lower())
+if not OmegaConf.has_resolver('if'):
+    OmegaConf.register_new_resolver('if', lambda pred, a, b: a if pred else b)
+if not OmegaConf.has_resolver('resolve_default'):
+    OmegaConf.register_new_resolver('resolve_default', lambda default, arg: default if arg=='' else arg)
 
 def make(
     seed: int, 
