@@ -92,11 +92,11 @@ class FrankaToy(VecTask):
 
         # Controller type
         self.control_type = self.cfg["env"]["controlType"]
-        assert self.control_type in {"osc", "admittance"}, "Invalid control type specified. Must be one of: {osc, admittance}"
-        if self.control_type == "admittance":
-            self.n_compliance = self.cfg["env"]["nCompliance"]
+        assert self.control_type in {"osc", "admittance", "position"}, "Invalid control type specified. Must be one of: {osc, admittance, position}"
+        if self.control_type == "admittance" or self.control_type == "position":
+            self.n_control_loop = self.cfg["env"]["nControlLoop"]
         else:
-            self.n_compliance = 1 # This is not used
+            self.n_control_loop = 1 # This is not used
 
         # obs include: eef_pose (7) + eef_vel (6)
         self.cfg["env"]["numObservations"] = 13
@@ -434,13 +434,29 @@ class FrankaToy(VecTask):
         self.actions = actions.clone().to(self.device)
         dpose = self.actions[:, :6]
         control_params = self.actions[:, 6:]
-        if self.control_type == "admittance":
+
+        if self.control_type == "position":
+            for i in range(self.n_control_loop):
+                # Use OSC for position control
+                self._effort_control = self._compute_osc_torques(dpose=dpose)
+
+                # Deploy actions
+                self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
+                if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
+                    # step physics and render each frame
+                    for i in range(self.control_freq_inv):
+                        if self.force_render:
+                            self.render()
+                        self.gym.simulate(self.sim)
+                        self._refresh()
+                       
+        elif self.control_type == "admittance":
             dpos_prev = dpose[:, :3] # (num_envs, 3)
             vel_prev = self.states['eef_vel'][:, :3] # (num_envs, 3)
             inertia = control_params[:, 0].unsqueeze(-1)  # (num_envs, 1)
             stiffness = control_params[:, 1].unsqueeze(-1)  # (num_envs, 1)
             damping = 2 * torch.sqrt(inertia * stiffness) # (num_envs, 1), Assume critical damping
-            for i in range(self.n_compliance):
+            for i in range(self.n_control_loop):
                 force = self._contact_forces[:, self.handles['franka_fingertip']] 
                 # Solve x' = f(x) using Euler's method, where x = [dpos, vel] TODO: Use 2nd order Heun's method
                 vel = vel_prev
@@ -452,18 +468,18 @@ class FrankaToy(VecTask):
                 # Use OSC for position control
                 dpose[:, :3] = dpos
                 self._effort_control = self._compute_osc_torques(dpose=dpose)
-
                 # Deploy actions
                 self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
-                if i < self.n_compliance - 1: # Skip the last step Since the last step will be done in step()
+                if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
                     # step physics and render each frame
                     for i in range(self.control_freq_inv):
                         if self.force_render:
                             self.render()
                         self.gym.simulate(self.sim)
-        else:
-            if self.control_type == "osc":
-                self._effort_control = self._compute_osc_torques(dpose=dpose)
+                        self._refresh()
+
+        elif self.control_type == "osc":
+            self._effort_control = self._compute_osc_torques(dpose=dpose)
 
             # Deploy actions
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))

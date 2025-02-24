@@ -16,9 +16,9 @@ env:
 
   aggregateMode: 3
 
-  controlType: 'osc' # 'osc' or 'admittance'
+  controlType: 'admittance' # 'osc' or 'admittance' or 'position'
   # Number of compliance control steps per policy step (only used for admittance control)
-  nCompliance: 10 # Note: Effective dt for the simulation becomes nCompliance * dt
+  nControlLoop: 10 # Note: Effective dt for the simulation becomes nControlLoop * dt
 
   asset:
     assetRoot: "../../assets"
@@ -28,7 +28,7 @@ env:
   enableCameraSensors: False
 
 sim:
-  dt: 0.01667 # 1/60 for 'osc', 1/60/nCompliance for 'admittance'
+  dt: 0.001667 # 1/60 for 'osc', 1/60/nControlLoop for 'admittance' and 'position'
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
