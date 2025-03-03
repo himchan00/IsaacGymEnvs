@@ -10,11 +10,8 @@ env:
   episodeLength: 500
   enableDebugVis: False
 
-  frankaPositionNoise: 0.0
-  frankaRotationNoise: 0.0
   frankaDofNoise: 0.25
-
-  aggregateMode: 3
+  boxPosNoise: 0.1
 
   controlType: 'admittance' # 'osc' or 'admittance' or 'position'
   # Number of compliance control steps per policy step (only used for admittance control)
