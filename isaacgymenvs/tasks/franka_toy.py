@@ -92,8 +92,8 @@ class FrankaToy(VecTask):
         else:
             self.n_control_loop = 1 # This is not used
 
-        # obs include: eef_pose (2) + eef_vel (2) + eef_force (2) + box_pose (2) + box_vel (2)
-        self.cfg["env"]["numObservations"] = 10
+        # obs include: eef_pose (2) + eef_vel (2) + eef_force (2) + box_pose (2) + box_vel (2) + box_orientation (2) + box_angular_vel (1)
+        self.cfg["env"]["numObservations"] = 13
         # actions include: delta EEF (2) + control params (2)
         self.cfg["env"]["numActions"] = 4
 
@@ -117,10 +117,11 @@ class FrankaToy(VecTask):
         self._franka_effort_limits = None         # Actuator effort limits for franka
         self._global_indices = None             # Unique indices corresponding to all envs in flattened array
 
-        self.debug_viz = self.cfg["env"]["enableDebugVis"]
-
         self.up_axis = "z"
         self.up_axis_idx = 2
+        self.friction_min, self.friction_max = self.cfg["env"]["minfriction"], self.cfg["env"]["maxfriction"]
+        self.inertia_min, self.inertia_max = self.cfg["env"]["mininertia"], self.cfg["env"]["maxinertia"]
+        self.stiffness_min, self.stiffness_max = self.cfg["env"]["minstiffness"], self.cfg["env"]["maxstiffness"]
 
         super().__init__(config=self.cfg, rl_device=rl_device, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless, virtual_screen_capture=virtual_screen_capture, force_render=force_render)
 
@@ -181,7 +182,7 @@ class FrankaToy(VecTask):
         table_thickness = 0.05
         table_opts = gymapi.AssetOptions()
         table_opts.fix_base_link = True
-        table_asset = self.gym.create_box(self.sim, *[1.2, 1.2, table_thickness], table_opts)
+        table_asset = self.gym.create_box(self.sim, *[2.4, 2.4, table_thickness], table_opts)
 
 
         # Create box asset
@@ -192,6 +193,14 @@ class FrankaToy(VecTask):
         box_opts.density = box_density
         box_asset = self.gym.create_box(self.sim, *[box_size] * 3, box_opts)
         box_color = gymapi.Vec3(0.6, 0.1, 0.0)
+
+        # Set target position, create a target asset
+        self._target_pos = [0.8, 0, 1.0]
+        target_size = 0.1
+        target_opts = gymapi.AssetOptions()
+        target_opts.fix_base_link = True
+        target_asset = self.gym.create_box(self.sim, *[target_size, target_size, table_thickness+1e-3], target_opts)
+        target_color = gymapi.Vec3(0.0, 0.6, 0.1)
 
         self.num_franka_bodies = self.gym.get_asset_rigid_body_count(franka_asset)
         self.num_franka_dofs = self.gym.get_asset_dof_count(franka_asset)
@@ -214,7 +223,7 @@ class FrankaToy(VecTask):
 
             self.franka_dof_lower_limits.append(franka_dof_props['lower'][i])
             self.franka_dof_upper_limits.append(franka_dof_props['upper'][i])
-            self._franka_effort_limits.append(franka_dof_props['effort'][i])
+            self._franka_effort_limits.append(franka_dof_props['effort'][i]) # Double the effort limits
 
         self.franka_dof_lower_limits = to_torch(self.franka_dof_lower_limits, device=self.device)
         self.franka_dof_upper_limits = to_torch(self.franka_dof_upper_limits, device=self.device)
@@ -236,11 +245,17 @@ class FrankaToy(VecTask):
         box_start_pose.p = gymapi.Vec3(*self._box_init_pos)
         box_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
 
+        # Define start pose for target
+        target_start_pose = gymapi.Transform()
+        target_start_pose.p = gymapi.Vec3(*self._target_pos)
+        target_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
+
         # The reference code uses aggregate mode for performance reasons, but we omit it here for simplicity
 
         self.envs = []
     
         # Create environments
+        friction = torch.linspace(self.friction_min, self.friction_max, num_envs, device=self.device)
         for i in range(self.num_envs):
             # create env instance
             env_ptr = self.gym.create_env(self.sim, lower, upper, num_per_row)
@@ -266,15 +281,17 @@ class FrankaToy(VecTask):
             """
             box_actor_handle = self.gym.create_actor(env_ptr, box_asset, box_start_pose, "box", i, 2, 0)
             b_shape_props = self.gym.get_actor_rigid_shape_properties(env_ptr, box_actor_handle)
-            friction = torch.rand((3,), device=self.device) * 2
             # Box actor has only one rigid shape
-            b_shape_props[0].friction = friction[0]
-            b_shape_props[0].rolling_friction = friction[1] # Not sure if this is used
-            b_shape_props[0].torsion_friction = friction[2]
+            b_shape_props[0].friction = 2 * friction[i]
+            b_shape_props[0].rolling_friction = 2 * friction[i] # Not sure if this is used
+            b_shape_props[0].torsion_friction = 2 * friction[i]
             self.gym.set_actor_rigid_shape_properties(env_ptr, box_actor_handle, b_shape_props)
             # Set color
             self.gym.set_rigid_body_color(env_ptr, box_actor_handle, 0, gymapi.MESH_VISUAL, box_color)
 
+            # Create target
+            target_actor_handle = self.gym.create_actor(env_ptr, target_asset, target_start_pose, "target", i, 3, 1)
+            self.gym.set_rigid_body_color(env_ptr, target_actor_handle, 0, gymapi.MESH_VISUAL, target_color)
             # Store the created env pointers
             self.envs.append(env_ptr)
             
@@ -323,7 +340,7 @@ class FrankaToy(VecTask):
         self._effort_control = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
 
         # Initialize indices
-        self._global_indices = torch.arange(self.num_envs * 3, dtype=torch.int32, device=self.device).view(self.num_envs, -1)
+        self._global_indices = torch.arange(self.num_envs * 4, dtype=torch.int32, device=self.device).view(self.num_envs, -1) # 4 is the number of actors in each env
 
     def _update_states(self):
         self.states.update({
@@ -351,13 +368,26 @@ class FrankaToy(VecTask):
         self._update_states()
 
     def compute_reward(self, actions):
-        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1), torch.ones_like(self.reset_buf), self.reset_buf)
+        # Compute reward as -dl/dt, where l is the distance between the box and the target
+        target_pos = torch.tensor(self._target_pos, device=self.device)[:2]
+        box_pos = self.states["box_pos"][:, :2]
+        delta_pos = box_pos - target_pos
+        delta_pos_hat = delta_pos / torch.norm(delta_pos, dim=-1, keepdim=True)
+        vel = self.states["box_vel"][:, :2]
+        reward = -torch.sum(vel * delta_pos_hat, dim=-1)
+        # Terminate when the box is close to the target & velocity is zero
+        is_terminal = (torch.norm(delta_pos, dim=-1) < 0.1) & (torch.norm(vel, dim=-1) < 1e-3)
+        reward += torch.where(is_terminal, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
+        self.rew_buf[:] = reward
+        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
 
     def compute_observations(self):
         self._refresh()
         obs = ["eef_pos", "eef_vel", "eef_force", "box_pos", "box_vel"]
         self.obs_buf = torch.cat([self.states[ob][:, :2] for ob in obs], dim=-1) # Only take x, y components
-
+        box_orientation_2D = self.states["box_quat"][:, 2:4] # Only take z, w components
+        box_angular_vel_2D = self.states["box_vel"][:, 5] # Only take z component
+        self.obs_buf = torch.cat([self.obs_buf, box_orientation_2D, box_angular_vel_2D.unsqueeze(-1)], dim=-1)
         return self.obs_buf
 
     def reset_idx(self, env_ids):
@@ -459,8 +489,11 @@ class FrankaToy(VecTask):
     def pre_physics_step(self, actions):
         # Control arm (scale value first)
         self.actions = actions.clone().to(self.device)
-        dpose = self._convert_2D_to_3D(self.actions[:, :2])
-        control_params = self.actions[:, 2:]
+        dpose = self._convert_2D_to_3D(self.actions[:, :2] * 0.1)
+        normalized = (self.actions[:, 2:] + 1.0) / 2
+        min_val = torch.tensor([self.inertia_min, self.stiffness_min], device=self.device)
+        max_val = torch.tensor([self.inertia_max, self.stiffness_max], device=self.device)
+        control_params = min_val * (max_val / min_val) ** normalized
         if self.control_type == "position":
             for i in range(self.n_control_loop):
                 # Use OSC for position control
