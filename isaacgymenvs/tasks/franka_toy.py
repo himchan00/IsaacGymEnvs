@@ -389,14 +389,10 @@ class FrankaToy(VecTask):
         vel = self.states["box_vel"][:, :2].clone()
         reward = -torch.sum(vel * delta_pos_hat, dim=-1)
         # Success when the box is close to the target & velocity is zero
-        is_terminal_success = (torch.norm(delta_pos, dim=-1) < 0.1) & (torch.norm(vel, dim=-1) < 1e-3)
-        reward += torch.where(is_terminal_success, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
-        # Fail when the box falls off the table
-        is_terminal_fail = (self.states["box_pos"][:, 2] < self._box_init_pos[2] - 0.1)
-        reward += torch.where(is_terminal_fail, torch.tensor(-100., device=self.device), torch.tensor(0., device=self.device))
+        is_terminal = (torch.norm(delta_pos, dim=-1) < 0.1) & (torch.norm(vel, dim=-1) < 1e-3)
+        reward += torch.where(is_terminal, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
         self.rew_buf[:] = reward
-        is_terminal = is_terminal_success | is_terminal_fail | (self.progress_buf >= self.max_episode_length - 1)
-        self.reset_buf[:] = torch.where(is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
+        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
 
     def compute_observations(self):
         self._refresh()
