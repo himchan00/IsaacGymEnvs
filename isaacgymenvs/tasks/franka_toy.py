@@ -86,7 +86,6 @@ class FrankaToy(VecTask):
 
         # Controller type
         self.control_type = self.cfg["env"]["controlType"]
-        assert self.control_type in {"osc", "admittance", "position"}, "Invalid control type specified. Must be one of: {osc, admittance, position}"
         if self.control_type == "admittance" or self.control_type == "position":
             self.n_control_loop = self.cfg["env"]["nControlLoop"]
         else:
@@ -94,14 +93,25 @@ class FrankaToy(VecTask):
 
         # obs include: eef_pose (2) + eef_vel (2) + eef_force (2) + box_pose (2) + box_vel (2) + box_orientation (2) + box_angular_vel (1)
         self.cfg["env"]["numObservations"] = 13
-        # actions include: delta EEF (2) + control params (2)
-        self.cfg["env"]["numActions"] = 4
+        # actions include: delta EEF (2) + control params (2) for admittance control, delta EEF (2) for position control and osc control
+        if self.control_type == "admittance":
+            self.cfg["env"]["numActions"] = 4
+            self.integration_var = self.cfg["env"]["integrationVar"]
+        elif self.control_type == "position":
+            self.cfg["env"]["numActions"] = 2
+        elif self.control_type == "osc":
+            self.cfg["env"]["numActions"] = 2
+        else:
+            raise ValueError("Invalid control type specified. Must be one of: {osc, admittance, position}")
 
         # Values to be filled in at runtime
         self.states = {}                        # will be dict filled with relevant states to use for reward calculation
         self.handles = {}                       # will be dict mapping names to relevant sim handles
         self.num_dofs = None                    # Total number of DOFs per env
         self.actions = None                     # Current actions to be deployed
+        self._error = None                      # x_d(t) - x_r(t) for admittance control
+        self._error_dot = None                  # x_d'(t) - x_r'(t)(=0) for admittance control
+        self.d_pos_prev = None                  # x_r(t-1) is required when integrationVar is x_d
 
         # Tensor placeholders
         self._root_state = None                 # State of root body        (n_envs, 13)
@@ -338,6 +348,9 @@ class FrankaToy(VecTask):
 
         # Initialize actions
         self._effort_control = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
+        self._error = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
+        self._error_dot = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
+        self.dpos_prev = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
 
         # Initialize indices
         self._global_indices = torch.arange(self.num_envs * 4, dtype=torch.int32, device=self.device).view(self.num_envs, -1) # 4 is the number of actors in each env
@@ -370,16 +383,20 @@ class FrankaToy(VecTask):
     def compute_reward(self, actions):
         # Compute reward as -dl/dt, where l is the distance between the box and the target
         target_pos = torch.tensor(self._target_pos, device=self.device)[:2]
-        box_pos = self.states["box_pos"][:, :2]
+        box_pos = self.states["box_pos"][:, :2].clone()
         delta_pos = box_pos - target_pos
         delta_pos_hat = delta_pos / torch.norm(delta_pos, dim=-1, keepdim=True)
-        vel = self.states["box_vel"][:, :2]
+        vel = self.states["box_vel"][:, :2].clone()
         reward = -torch.sum(vel * delta_pos_hat, dim=-1)
-        # Terminate when the box is close to the target & velocity is zero
-        is_terminal = (torch.norm(delta_pos, dim=-1) < 0.1) & (torch.norm(vel, dim=-1) < 1e-3)
-        reward += torch.where(is_terminal, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
+        # Success when the box is close to the target & velocity is zero
+        is_terminal_success = (torch.norm(delta_pos, dim=-1) < 0.1) & (torch.norm(vel, dim=-1) < 1e-3)
+        reward += torch.where(is_terminal_success, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
+        # Fail when the box falls off the table
+        is_terminal_fail = (self.states["box_pos"][:, 2] < self._box_init_pos[2] - 0.1)
+        reward += torch.where(is_terminal_fail, torch.tensor(-100., device=self.device), torch.tensor(0., device=self.device))
         self.rew_buf[:] = reward
-        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
+        is_terminal = is_terminal_success | is_terminal_fail | (self.progress_buf >= self.max_episode_length - 1)
+        self.reset_buf[:] = torch.where(is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
 
     def compute_observations(self):
         self._refresh()
@@ -406,6 +423,9 @@ class FrankaToy(VecTask):
         # Set effort control to be 0
         # NOTE: Task takes care of actually propagating these controls in sim using the SimActions API
         self._effort_control[env_ids, :] = torch.zeros_like(pos)
+        self._error[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
+        self._error_dot[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
+        self.dpos_prev[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
 
         # Deploy updates
         multi_env_ids_int32 = self._global_indices[env_ids, 0].flatten()
@@ -481,19 +501,15 @@ class FrankaToy(VecTask):
         goal_quat = quat_from_euler_xyz(torch.tensor([math.pi]), torch.tensor([0]), torch.tensor([0])).repeat(num_envs, 1).to(self.device)
         d_pose_3d = torch.zeros((num_envs, 6), device=self.device)
         d_pose_3d[:, :2] = d_pose_2d.clone()
-        d_pose_3d[:, 2] = torch.tensor(self._box_init_pos[2], device=self.device).unsqueeze(-1) - self._eef_state[:, 2]
-        angle, axis = quat_to_angle_axis(quat_mul(goal_quat, quat_conjugate(self._eef_state[:, 3:7])))
+        d_pose_3d[:, 2] = torch.tensor(self._box_init_pos[2], device=self.device).unsqueeze(-1) - self._eef_state[:, 2].clone()
+        angle, axis = quat_to_angle_axis(quat_mul(goal_quat, quat_conjugate(self._eef_state[:, 3:7]).clone()))
         d_pose_3d[:, 3:] = angle.unsqueeze(-1) * axis
         return d_pose_3d
 
     def pre_physics_step(self, actions):
         # Control arm (scale value first)
         self.actions = actions.clone().to(self.device)
-        dpose = self._convert_2D_to_3D(self.actions[:, :2] * 0.1)
-        normalized = (self.actions[:, 2:] + 1.0) / 2
-        min_val = torch.tensor([self.inertia_min, self.stiffness_min], device=self.device)
-        max_val = torch.tensor([self.inertia_max, self.stiffness_max], device=self.device)
-        control_params = min_val * (max_val / min_val) ** normalized
+        dpose = self._convert_2D_to_3D(self.actions[:, :2].clone() * 0.1) # Scale the actions by 0.1
         if self.control_type == "position":
             for i in range(self.n_control_loop):
                 # Use OSC for position control
@@ -510,22 +526,28 @@ class FrankaToy(VecTask):
                         self._refresh()
                        
         elif self.control_type == "admittance":
-            dpos = dpose[:, :2] # (num_envs, 2)
-            delta_x_prev = torch.zeros_like(dpos)
-            delta_v_prev = torch.zeros_like(dpos)
-            inertia = control_params[:, 0].unsqueeze(-1)  # (num_envs, 1)
-            stiffness = control_params[:, 1].unsqueeze(-1)  # (num_envs, 1)
+            normalized_control_params = (self.actions[:, 2:].clone() + 1.0) / 2
+            min_val = torch.tensor([self.inertia_min, self.stiffness_min], device=self.device)
+            max_val = torch.tensor([self.inertia_max, self.stiffness_max], device=self.device)
+            control_params = min_val * (max_val / min_val) ** normalized_control_params
+            
+            dpos = dpose[:, :2].clone() # (num_envs, 2)
+            delta_dpos = dpos - self.dpos_prev
+            self.dpos_prev = dpos
+            if self.integration_var == "x_d":
+                self._error -= delta_dpos
+
+            inertia = control_params[:, 0].clone().unsqueeze(-1)  # (num_envs, 1)
+            stiffness = control_params[:, 1].clone().unsqueeze(-1)  # (num_envs, 1)
             damping = 2 * torch.sqrt(inertia * stiffness) # (num_envs, 1), Assume critical damping
             for i in range(self.n_control_loop):
                 force = self.states['eef_force'][:, :2] # (num_envs, 2)
                 # Solve x' = f(x), where x = [dpos, vel] 
-                delta_a = (force - damping * delta_v_prev - stiffness * delta_x_prev) / inertia
-                delta_v = delta_v_prev + delta_a * self.dt
-                delta_x = delta_x_prev + (delta_v + delta_v_prev) / 2 * self.dt
-                delta_x_prev = delta_x
-                delta_v_prev = delta_v
+                error_two_dot = (force - damping * self._error_dot - stiffness * self._error) / inertia
+                self._error += self._error_dot * self.dt + error_two_dot * self.dt ** 2 / 2
+                self._error_dot += error_two_dot * self.dt
                 # Use OSC for position control
-                dpose[:, :2] = dpos + delta_x
+                dpose[:, :2] = dpos + self._error
                 self._effort_control = self._compute_osc_torques(dpose=dpose)
                 # Deploy actions
                 self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))

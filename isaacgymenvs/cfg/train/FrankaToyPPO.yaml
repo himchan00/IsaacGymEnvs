@@ -47,7 +47,7 @@ params:
     reward_shaper:
       scale_value: 1.0
     normalize_advantage: True
-    gamma: 1.00
+    gamma: 0.99
     tau: 0.95
     learning_rate: 5e-4
     lr_schedule: constant

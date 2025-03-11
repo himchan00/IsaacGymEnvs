@@ -9,19 +9,22 @@ env:
   envSpacing: 2.4
   episodeLength: 300
   enableDebugVis: False
+  clipActions: 1.0
+
   mininertia: 1.0
   maxinertia: 10.0
-  minstiffness: 1000.0
-  maxstiffness: 10000.0
+  minstiffness: 50.0
+  maxstiffness: 500.0
   minfriction: 0.3
   maxfriction: 0.3
 
   frankaDofNoise: 0.25
   boxPosNoise: 0.1
 
-  controlType: 'osc' # 'osc' or 'admittance' or 'position'
+  controlType: 'admittance' # 'osc' or 'admittance' or 'position'
   # Number of compliance control steps per policy step (only used for admittance control)
   nControlLoop: 10 # Note: Effective dt for the simulation becomes nControlLoop * dt
+  integrationVar: "x_d" # 'error' or 'x_d'. If 'error', error = x_d - x_r is continous, else x_d is continous
 
   asset:
     assetRoot: "../../assets"
@@ -31,7 +34,7 @@ env:
   enableCameraSensors: False
 
 sim:
-  dt: 0.01667 # 1/60 for 'osc', 1/60/nControlLoop for 'admittance' and 'position'
+  dt: 0.001667 # 1/60 for 'osc', 1/60/nControlLoop for 'admittance' and 'position'
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
