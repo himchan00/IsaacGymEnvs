@@ -60,7 +60,7 @@ headless: True
 # set default task and default training config based on task
 defaults:
   - task: FrankaToy
-  - train: ${task}PPO
+  - train: ${task}PPO_LSTM # PPO_LSTM for LSTM based policies, PPO for MLP based policies
   - pbt: no_pbt
   - override hydra/job_logging: disabled
   - _self_

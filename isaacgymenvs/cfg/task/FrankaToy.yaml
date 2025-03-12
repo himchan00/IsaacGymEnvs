@@ -13,15 +13,15 @@ env:
 
   mininertia: 1.0
   maxinertia: 10.0
-  minstiffness: 50.0
-  maxstiffness: 500.0
-  minfriction: 0.3
-  maxfriction: 0.3
+  minstiffness: 100.0
+  maxstiffness: 1000.0
+  minfriction: 0.03
+  maxfriction: 0.6
 
   frankaDofNoise: 0.25
   boxPosNoise: 0.1
 
-  controlType: 'admittance' # 'osc' or 'admittance' or 'position'
+  controlType: 'osc' # 'osc' or 'admittance' or 'position'
   # Number of compliance control steps per policy step (only used for admittance control)
   nControlLoop: 10 # Note: Effective dt for the simulation becomes nControlLoop * dt
   integrationVar: "x_d" # 'error' or 'x_d'. If 'error', error = x_d - x_r is continous, else x_d is continous
@@ -34,7 +34,7 @@ env:
   enableCameraSensors: False
 
 sim:
-  dt: 0.001667 # 1/60 for 'osc', 1/60/nControlLoop for 'admittance' and 'position'
+  dt: 0.01667 # 1/60 for 'osc', 1/60/nControlLoop for 'admittance' and 'position'
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}

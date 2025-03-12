@@ -21,7 +21,7 @@ params:
           val: 0
         fixed_sigma: True
     mlp:
-      units: [256, 128, 64]
+      units: [128, 64]
       activation: elu
       d2rl: False
 
@@ -29,6 +29,12 @@ params:
         name: default
       regularizer:
         name: None
+
+    rnn:
+      name: lstm
+      units: 128
+      layers: 2
+      before_mlp: True
 
   load_checkpoint: ${if:${...checkpoint},True,False} # flag which sets whether to load the checkpoint
   load_path: ${...checkpoint} # path to the checkpoint to load
@@ -65,5 +71,5 @@ params:
     mini_epochs: 5
     critic_coef: 4
     clip_value: True
-    seq_length: 1
+    seq_length: 16
     bounds_loss_coef: 0.0005

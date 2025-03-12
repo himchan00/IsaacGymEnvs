@@ -505,7 +505,7 @@ class FrankaToy(VecTask):
     def pre_physics_step(self, actions):
         # Control arm (scale value first)
         self.actions = actions.clone().to(self.device)
-        dpose = self._convert_2D_to_3D(self.actions[:, :2].clone() * 0.1) # Scale the actions by 0.1
+        dpose = self._convert_2D_to_3D(self.actions[:, :2].clone() * 0.2) # Scale the actions by 0.1
         if self.control_type == "position":
             for i in range(self.n_control_loop):
                 # Use OSC for position control
