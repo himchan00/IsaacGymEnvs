@@ -71,5 +71,5 @@ params:
     mini_epochs: 5
     critic_coef: 4
     clip_value: True
-    seq_length: 16
+    seq_length: 8
     bounds_loss_coef: 0.0005
