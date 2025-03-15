@@ -111,7 +111,8 @@ class FrankaToy(VecTask):
         self.actions = None                     # Current actions to be deployed
         self._error = None                      # x_d(t) - x_r(t) for admittance control
         self._error_dot = None                  # x_d'(t) - x_r'(t)(=0) for admittance control
-        self.d_pos_prev = None                  # x_r(t-1) is required when integrationVar is x_d
+        self.x_r_pos_prev = None                # x, y component of x_r(t-1) is required when integrationVar is x_d
+        self.distance_prev = None               # 2D distance between box and target at t-1. Required for reward calculation
 
         # Tensor placeholders
         self._root_state = None                 # State of root body        (n_envs, 13)
@@ -350,7 +351,9 @@ class FrankaToy(VecTask):
         self._effort_control = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
         self._error = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
         self._error_dot = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
-        self.dpos_prev = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
+        self.x_r_pos_prev = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
+
+        self.distance_prev = torch.zeros((self.num_envs), dtype=torch.float, device=self.device) # Set to 0 for now, will be initialized in reset_idx
 
         # Initialize indices
         self._global_indices = torch.arange(self.num_envs * 4, dtype=torch.int32, device=self.device).view(self.num_envs, -1) # 4 is the number of actors in each env
@@ -381,16 +384,14 @@ class FrankaToy(VecTask):
         self._update_states()
 
     def compute_reward(self, actions):
-        # Compute reward as -dl/dt, where l is the distance between the box and the target
-        target_pos = torch.tensor(self._target_pos, device=self.device)[:2]
-        box_pos = self.states["box_pos"][:, :2].clone()
-        delta_pos = box_pos - target_pos
-        delta_pos_hat = delta_pos / torch.norm(delta_pos, dim=-1, keepdim=True)
-        vel = self.states["box_vel"][:, :2].clone()
-        reward = -torch.sum(vel * delta_pos_hat, dim=-1)
+        # Compute current 2D distance between box and target
+        distance = torch.norm(self.states["box_pos"][:, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
+        delta_distance = distance - self.distance_prev
+        self.distance_prev = distance
+        reward = -delta_distance
         # Success when the box is close to the target & velocity is zero
-        is_terminal = (torch.norm(delta_pos, dim=-1) < 0.1) & (torch.norm(vel, dim=-1) < 1e-3)
-        reward += torch.where(is_terminal, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
+        is_terminal = (distance < 0.1) & (torch.norm(self.states["box_vel"][:, :2], dim=-1) < 1e-3)
+        reward += torch.where(is_terminal, torch.tensor(10., device=self.device), torch.tensor(0., device=self.device))
         self.rew_buf[:] = reward
         self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
 
@@ -421,7 +422,7 @@ class FrankaToy(VecTask):
         self._effort_control[env_ids, :] = torch.zeros_like(pos)
         self._error[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
         self._error_dot[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
-        self.dpos_prev[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
+        self.x_r_pos_prev[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
 
         # Deploy updates
         multi_env_ids_int32 = self._global_indices[env_ids, 0].flatten()
@@ -459,6 +460,10 @@ class FrankaToy(VecTask):
             self.sim, gymtorch.unwrap_tensor(self._root_state),
             gymtorch.unwrap_tensor(multi_env_ids_cubes_int32), len(multi_env_ids_cubes_int32))
 
+        # Initialize distance_prev
+        self.distance_prev[env_ids] = torch.norm(self._box_state[env_ids, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
+
+        # Set the progress and reset buffers
         self.progress_buf[env_ids] = 0
         self.reset_buf[env_ids] = 0
 
@@ -502,15 +507,41 @@ class FrankaToy(VecTask):
         d_pose_3d[:, 3:] = angle.unsqueeze(-1) * axis
         return d_pose_3d
 
+
+    def _delta_pos_to_pose(self, dpose):
+        """
+        delta pose: (delta x, delta y, delta z, delta orientation) where delta orientation is represented as axis-angle
+        pose: (x, y, z, quaternion)
+        """
+        pose = torch.zeros((self.num_envs, 7), device=self.device)
+        pose[:, :3] = (self.states["eef_pos"] + dpose[:, :3]).clone()
+        dquat = axisangle2quat(dpose[:, 3:])
+        pose[:, 3:] = quat_mul(dquat, self.states["eef_quat"])
+        return pose
+
+
+    def _pose_to_delta_pose(self, pose):
+        """
+        pose: (x, y, z, quaternion)
+        delta pose: (delta x, delta y, delta z, delta orientation) where delta orientation is represented as axis-angle
+        """
+        delta_pose = torch.zeros((self.num_envs, 6), device=self.device)
+        delta_pose[:, :3] = (pose[:, :3] - self.states["eef_pos"]).clone()
+        angle, axis = quat_to_angle_axis(quat_mul(pose[:, 3:], quat_conjugate(self.states["eef_quat"])))
+        delta_pose[:, 3:] = angle.unsqueeze(-1) * axis
+        return delta_pose
+
+
     def pre_physics_step(self, actions):
         # Control arm (scale value first)
         self.actions = actions.clone().to(self.device)
-        dpose = self._convert_2D_to_3D(self.actions[:, :2].clone() * 0.2) # Scale the actions by 0.1
+        delta_x_r = self._convert_2D_to_3D(self.actions[:, :2].clone() * 0.2) # Scale the actions by 0.2
         if self.control_type == "position":
+            x_r = self._delta_pos_to_pose(delta_x_r)
             for i in range(self.n_control_loop):
                 # Use OSC for position control
-                self._effort_control = self._compute_osc_torques(dpose=dpose)
-
+                delta_x_r = self._pose_to_delta_pose(x_r)
+                self._effort_control = self._compute_osc_torques(dpose=delta_x_r)
                 # Deploy actions
                 self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
                 if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
@@ -527,11 +558,12 @@ class FrankaToy(VecTask):
             max_val = torch.tensor([self.inertia_max, self.stiffness_max], device=self.device)
             control_params = min_val * (max_val / min_val) ** normalized_control_params
             
-            dpos = dpose[:, :2].clone() # (num_envs, 2)
-            delta_dpos = dpos - self.dpos_prev
-            self.dpos_prev = dpos
+            x_r = self._delta_pos_to_pose(delta_x_r)
+            x_d = x_r.clone()
+            x_r_pos = x_r[:, :2].clone() # (num_envs, 2)
             if self.integration_var == "x_d":
-                self._error -= delta_dpos
+                self._error -= (x_r_pos - self.x_r_pos_prev)
+            self.x_r_pos_prev = x_r_pos
 
             inertia = control_params[:, 0].clone().unsqueeze(-1)  # (num_envs, 1)
             stiffness = control_params[:, 1].clone().unsqueeze(-1)  # (num_envs, 1)
@@ -543,8 +575,9 @@ class FrankaToy(VecTask):
                 self._error += self._error_dot * self.dt + error_two_dot * self.dt ** 2 / 2
                 self._error_dot += error_two_dot * self.dt
                 # Use OSC for position control
-                dpose[:, :2] = dpos + self._error
-                self._effort_control = self._compute_osc_torques(dpose=dpose)
+                x_d[:, :2] = x_r[:, :2] + self._error
+                delta_x_d = self._pose_to_delta_pose(x_d)
+                self._effort_control = self._compute_osc_torques(dpose=delta_x_d)
                 # Deploy actions
                 self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
                 if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
@@ -556,7 +589,7 @@ class FrankaToy(VecTask):
                         self._refresh()
 
         elif self.control_type == "osc":
-            self._effort_control = self._compute_osc_torques(dpose=dpose)
+            self._effort_control = self._compute_osc_torques(dpose=delta_x_r)
 
             # Deploy actions
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
