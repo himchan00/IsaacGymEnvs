@@ -36,7 +36,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.
 from isaacgym import gymtorch
 from isaacgym import gymapi
 
-from isaacgymenvs.utils.torch_jit_utils import to_torch, tensor_clamp, quat_from_euler_xyz, quat_conjugate, quat_to_angle_axis, quat_mul
+from isaacgymenvs.utils.torch_jit_utils import to_torch, tensor_clamp, quat_conjugate, quat_to_angle_axis, quat_mul, quat_axis
 from isaacgymenvs.tasks.base.vec_task import VecTask
 import gym
 
@@ -140,7 +140,7 @@ class FrankaToy(VecTask):
         self.franka_default_dof_pos = to_torch([- (1 / 4) * np.pi, (1 / 8) * np.pi, 0, - (6 / 8) * np.pi, 0, 2.9416, 0], device=self.device)
 
         # OSC Gains
-        self.kp = to_torch([1000.] * 6, device=self.device)
+        self.kp = to_torch([100., 100., 1000, 1000, 1000, 1000], device=self.device) # More weight on z-axis and orientation
         self.kd = 2 * torch.sqrt(self.kp)
         self.kp_null = to_torch([10.] * 7, device=self.device)
         self.kd_null = 2 * torch.sqrt(self.kp_null)
@@ -234,7 +234,7 @@ class FrankaToy(VecTask):
 
             self.franka_dof_lower_limits.append(franka_dof_props['lower'][i])
             self.franka_dof_upper_limits.append(franka_dof_props['upper'][i])
-            self._franka_effort_limits.append(franka_dof_props['effort'][i]) # Double the effort limits
+            self._franka_effort_limits.append(franka_dof_props['effort'][i])
 
         self.franka_dof_lower_limits = to_torch(self.franka_dof_lower_limits, device=self.device)
         self.franka_dof_upper_limits = to_torch(self.franka_dof_upper_limits, device=self.device)
@@ -388,10 +388,10 @@ class FrankaToy(VecTask):
         distance = torch.norm(self.states["box_pos"][:, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
         delta_distance = distance - self.distance_prev
         self.distance_prev = distance
-        reward = -delta_distance
+        reward = -delta_distance/self.dt/self.n_control_loop
         # Success when the box is close to the target & velocity is zero
         is_terminal = (distance < 0.1) & (torch.norm(self.states["box_vel"][:, :2], dim=-1) < 1e-3)
-        reward += torch.where(is_terminal, torch.tensor(10., device=self.device), torch.tensor(0., device=self.device))
+        reward += torch.where(is_terminal, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
         self.rew_buf[:] = reward
         self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
 
@@ -473,7 +473,11 @@ class FrankaToy(VecTask):
         q, qd = self._q[:, :7], self._qd[:, :7]
         mm_inv = torch.inverse(self._mm)
         m_eef_inv = self._j_eef @ mm_inv @ torch.transpose(self._j_eef, 1, 2)
-        m_eef = torch.inverse(m_eef_inv)
+        try:
+            m_eef = torch.inverse(m_eef_inv)
+        except:
+            m_eef_inv += 1e-3 * torch.eye(6, device=self.device).unsqueeze(0)
+            m_eef = torch.linalg.pinv(m_eef_inv, hermitian=True)
 
         # Transform our cartesian action `dpose` into joint torques `u`
         u = torch.transpose(self._j_eef, 1, 2) @ m_eef @ (self.kp * dpose - self.kd * self.states["eef_vel"]).unsqueeze(-1)
@@ -499,16 +503,18 @@ class FrankaToy(VecTask):
         delta z is calculated to match the box center, delta orientation is calculated to match the goal orientation, which is Rot(\hat{x}, \pi)
         """
         num_envs = d_pose_2d.shape[0]
-        goal_quat = quat_from_euler_xyz(torch.tensor([math.pi]), torch.tensor([0]), torch.tensor([0])).repeat(num_envs, 1).to(self.device)
+        eef_z_axis = quat_axis(self._eef_state[:, 3:7].clone(), 2)
+        minus_z_axis = torch.tensor([0., 0., -1.], device=self.device).repeat(num_envs, 1)
+        axis = torch.cross(eef_z_axis, minus_z_axis)
+        angle = torch.acos(torch.sum(eef_z_axis * minus_z_axis, dim=-1))
         d_pose_3d = torch.zeros((num_envs, 6), device=self.device)
         d_pose_3d[:, :2] = d_pose_2d.clone()
         d_pose_3d[:, 2] = torch.tensor(self._box_init_pos[2], device=self.device).unsqueeze(-1) - self._eef_state[:, 2].clone()
-        angle, axis = quat_to_angle_axis(quat_mul(goal_quat, quat_conjugate(self._eef_state[:, 3:7]).clone()))
         d_pose_3d[:, 3:] = angle.unsqueeze(-1) * axis
         return d_pose_3d
 
 
-    def _delta_pos_to_pose(self, dpose):
+    def _delta_pose_to_pose(self, dpose):
         """
         delta pose: (delta x, delta y, delta z, delta orientation) where delta orientation is represented as axis-angle
         pose: (x, y, z, quaternion)
@@ -537,7 +543,7 @@ class FrankaToy(VecTask):
         self.actions = actions.clone().to(self.device)
         delta_x_r = self._convert_2D_to_3D(self.actions[:, :2].clone() * 0.2) # Scale the actions by 0.2
         if self.control_type == "position":
-            x_r = self._delta_pos_to_pose(delta_x_r)
+            x_r = self._delta_pose_to_pose(delta_x_r)
             for i in range(self.n_control_loop):
                 # Use OSC for position control
                 delta_x_r = self._pose_to_delta_pose(x_r)
@@ -558,7 +564,7 @@ class FrankaToy(VecTask):
             max_val = torch.tensor([self.inertia_max, self.stiffness_max], device=self.device)
             control_params = min_val * (max_val / min_val) ** normalized_control_params
             
-            x_r = self._delta_pos_to_pose(delta_x_r)
+            x_r = self._delta_pose_to_pose(delta_x_r)
             x_d = x_r.clone()
             x_r_pos = x_r[:, :2].clone() # (num_envs, 2)
             if self.integration_var == "x_d":

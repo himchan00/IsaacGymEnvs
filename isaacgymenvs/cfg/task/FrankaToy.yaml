@@ -7,7 +7,7 @@ physics_engine: ${..physics_engine}
 env:
   numEnvs: 8192
   envSpacing: 2.4
-  episodeLength: 300
+  episodeLength: 100
   enableDebugVis: False
   clipActions: 1.0
 
@@ -21,7 +21,7 @@ env:
   frankaDofNoise: 0.25
   boxPosNoise: 0.1
 
-  controlType: 'osc' # 'osc' or 'admittance' or 'position'
+  controlType: 'position' # 'osc' or 'admittance' or 'position'
   # Number of compliance control steps per policy step (only used for admittance control)
   nControlLoop: 10 # Note: Effective dt for the simulation becomes nControlLoop * dt
   integrationVar: "x_d" # 'error' or 'x_d'. If 'error', error = x_d - x_r is continous, else x_d is continous
@@ -34,7 +34,7 @@ env:
   enableCameraSensors: False
 
 sim:
-  dt: 0.01667 # 1/60 for 'osc', 1/60/nControlLoop for 'admittance' and 'position'
+  dt: 0.005 # 1/20 for 'osc', 1/20/nControlLoop for 'admittance' and 'position'
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
