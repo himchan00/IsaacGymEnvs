@@ -399,15 +399,16 @@ class FrankaToy(VecTask):
 
     def compute_observations(self):
         self._refresh()
-        obs = ["eef_pos", "eef_vel", "box_vel"]
+        eef_obs = ["eef_pos", "eef_vel"]
         if self.obs_force:
-            obs.append("eef_force")
-        self.obs_buf = torch.cat([self.states[ob][:, :2] for ob in obs], dim=-1) # Only take x, y components
+            eef_obs.append("eef_force")
+        self.obs_buf = torch.cat([self.states[ob][:, :2] for ob in eef_obs], dim=-1) # Only take x, y components
         box_pos = self.states["box_pos"][:, :2] # Only take x, y components
         box_pos += torch.randn_like(box_pos) * self.box_pos_error_std
+        box_vel = self.states["box_vel"][:, :2] # Only take x, y components
         box_orientation_2D = self.states["box_quat"][:, 2:4] # Only take z, w components
         box_angular_vel_2D = self.states["box_vel"][:, 5] # Only take z component
-        self.obs_buf = torch.cat([self.obs_buf, box_pos, box_orientation_2D, box_angular_vel_2D.unsqueeze(-1)], dim=-1)
+        self.obs_buf = torch.cat([self.obs_buf, box_pos, box_vel, box_orientation_2D, box_angular_vel_2D.unsqueeze(-1)], dim=-1)
         return self.obs_buf
 
     def reset_idx(self, env_ids):
