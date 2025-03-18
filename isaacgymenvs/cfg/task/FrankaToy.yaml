@@ -8,6 +8,7 @@ env:
   numEnvs: 8192
   envSpacing: 2.4
   episodeLength: 100
+  obsForce: False
   enableDebugVis: False
   clipActions: 1.0
 
@@ -18,8 +19,9 @@ env:
   minfriction: 0.03
   maxfriction: 0.6
 
-  frankaDofNoise: 0.25
-  boxPosNoise: 0.1
+  initfrankaDofNoise: 0.25
+  initboxPosNoise: 0.1
+  boxPosErrorStd: 0.0
 
   controlType: 'position' # 'osc' or 'admittance' or 'position'
   # Number of compliance control steps per policy step (only used for admittance control)

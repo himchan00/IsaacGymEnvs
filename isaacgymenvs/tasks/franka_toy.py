@@ -81,8 +81,10 @@ class FrankaToy(VecTask):
         self.cfg = cfg
 
         self.max_episode_length = self.cfg["env"]["episodeLength"]
-        self.franka_dof_noise = self.cfg["env"]["frankaDofNoise"]
-        self.box_pos_noise = self.cfg["env"]["boxPosNoise"]
+        self.obs_force = self.cfg["env"]["obsForce"]
+        self.init_franka_dof_noise = self.cfg["env"]["initfrankaDofNoise"]
+        self.init_box_pos_noise = self.cfg["env"]["initboxPosNoise"]
+        self.box_pos_error_std = self.cfg["env"]["boxPosErrorStd"]
 
         # Controller type
         self.control_type = self.cfg["env"]["controlType"]
@@ -92,7 +94,7 @@ class FrankaToy(VecTask):
             self.n_control_loop = 1 # This is not used
 
         # obs include: eef_pose (2) + eef_vel (2) + eef_force (2) + box_pose (2) + box_vel (2) + box_orientation (2) + box_angular_vel (1)
-        self.cfg["env"]["numObservations"] = 13
+        self.cfg["env"]["numObservations"] = 13 if self.obs_force else 11
         # actions include: delta EEF (2) + control params (2) for admittance control, delta EEF (2) for position control and osc control
         if self.control_type == "admittance":
             self.cfg["env"]["numActions"] = 4
@@ -397,11 +399,15 @@ class FrankaToy(VecTask):
 
     def compute_observations(self):
         self._refresh()
-        obs = ["eef_pos", "eef_vel", "eef_force", "box_pos", "box_vel"]
+        obs = ["eef_pos", "eef_vel", "box_vel"]
+        if self.obs_force:
+            obs.append("eef_force")
         self.obs_buf = torch.cat([self.states[ob][:, :2] for ob in obs], dim=-1) # Only take x, y components
+        box_pos = self.states["box_pos"][:, :2] # Only take x, y components
+        box_pos += torch.randn_like(box_pos) * self.box_pos_error_std
         box_orientation_2D = self.states["box_quat"][:, 2:4] # Only take z, w components
         box_angular_vel_2D = self.states["box_vel"][:, 5] # Only take z component
-        self.obs_buf = torch.cat([self.obs_buf, box_orientation_2D, box_angular_vel_2D.unsqueeze(-1)], dim=-1)
+        self.obs_buf = torch.cat([self.obs_buf, box_pos, box_orientation_2D, box_angular_vel_2D.unsqueeze(-1)], dim=-1)
         return self.obs_buf
 
     def reset_idx(self, env_ids):
@@ -409,7 +415,7 @@ class FrankaToy(VecTask):
         reset_noise = torch.rand((len(env_ids), 7), device=self.device)
         pos = tensor_clamp(
             self.franka_default_dof_pos.unsqueeze(0) +
-            self.franka_dof_noise * 2.0 * (reset_noise - 0.5),
+            self.init_franka_dof_noise * 2.0 * (reset_noise - 0.5),
             self.franka_dof_lower_limits, self.franka_dof_upper_limits
         )
 
@@ -443,7 +449,7 @@ class FrankaToy(VecTask):
         # 1. Set position
         pos = torch.zeros((len(env_ids), 3), device=self.device)
         box_init_pos = torch.tensor(self._box_init_pos, device=self.device)
-        pos[:, :2] = box_init_pos[:2] + self.box_pos_noise * 2.0 * (torch.rand((len(env_ids), 2), device=self.device) - 0.5)
+        pos[:, :2] = box_init_pos[:2] + self.init_box_pos_noise * 2.0 * (torch.rand((len(env_ids), 2), device=self.device) - 0.5)
         pos[:, 2] = box_init_pos[2]
         self._box_state[env_ids, :3] = pos
         # 2. Set orientation
@@ -505,7 +511,7 @@ class FrankaToy(VecTask):
         num_envs = d_pose_2d.shape[0]
         eef_z_axis = quat_axis(self._eef_state[:, 3:7].clone(), 2)
         minus_z_axis = torch.tensor([0., 0., -1.], device=self.device).repeat(num_envs, 1)
-        axis = torch.cross(eef_z_axis, minus_z_axis)
+        axis = torch.linalg.cross(eef_z_axis, minus_z_axis)
         angle = torch.acos(torch.sum(eef_z_axis * minus_z_axis, dim=-1))
         d_pose_3d = torch.zeros((num_envs, 6), device=self.device)
         d_pose_3d[:, :2] = d_pose_2d.clone()
