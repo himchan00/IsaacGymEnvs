@@ -9,6 +9,7 @@ env:
   envSpacing: 2.4
   episodeLength: 100
   obsForce: False
+  obsVel: False
   enableDebugVis: False
   clipActions: 1.0
 

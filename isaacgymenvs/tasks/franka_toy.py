@@ -82,6 +82,7 @@ class FrankaToy(VecTask):
 
         self.max_episode_length = self.cfg["env"]["episodeLength"]
         self.obs_force = self.cfg["env"]["obsForce"]
+        self.obs_vel = self.cfg["env"]["obsVel"]
         self.init_franka_dof_noise = self.cfg["env"]["initfrankaDofNoise"]
         self.init_box_pos_noise = self.cfg["env"]["initboxPosNoise"]
         self.box_pos_error_std = self.cfg["env"]["boxPosErrorStd"]
@@ -93,8 +94,12 @@ class FrankaToy(VecTask):
         else:
             self.n_control_loop = 1 # This is not used
 
-        # obs include: eef_pose (2) + eef_vel (2) + eef_force (2) + box_pose (2) + box_vel (2) + box_orientation (2) + box_angular_vel (1)
-        self.cfg["env"]["numObservations"] = 13 if self.obs_force else 11
+        # Full obs: eef_pose (2) + eef_vel (2) + eef_force (2) + box_pose (2) + box_vel (2) + box_orientation (2) + box_angular_vel (1)
+        self.cfg["env"]["numObservations"] = 8
+        if self.obs_force:
+            self.cfg["env"]["numObservations"] += 2
+        if self.obs_vel:
+            self.cfg["env"]["numObservations"] += 3
         # actions include: delta EEF (2) + control params (2) for admittance control, delta EEF (2) for position control and osc control
         if self.control_type == "admittance":
             self.cfg["env"]["numActions"] = 4
@@ -405,10 +410,13 @@ class FrankaToy(VecTask):
         self.obs_buf = torch.cat([self.states[ob][:, :2] for ob in eef_obs], dim=-1) # Only take x, y components
         box_pos = self.states["box_pos"][:, :2] # Only take x, y components
         box_pos += torch.randn_like(box_pos) * self.box_pos_error_std
-        box_vel = self.states["box_vel"][:, :2] # Only take x, y components
         box_orientation_2D = self.states["box_quat"][:, 2:4] # Only take z, w components
-        box_angular_vel_2D = self.states["box_vel"][:, 5] # Only take z component
-        self.obs_buf = torch.cat([self.obs_buf, box_pos, box_vel, box_orientation_2D, box_angular_vel_2D.unsqueeze(-1)], dim=-1)
+        if self.obs_vel:
+            box_vel = self.states["box_vel"][:, :2] # Only take x, y components
+            box_angular_vel_2D = self.states["box_vel"][:, 5] # Only take z component
+            self.obs_buf = torch.cat([self.obs_buf, box_pos, box_vel, box_orientation_2D, box_angular_vel_2D.unsqueeze(-1)], dim=-1)
+        else:
+            self.obs_buf = torch.cat([self.obs_buf, box_pos, box_orientation_2D], dim=-1)
         return self.obs_buf
 
     def reset_idx(self, env_ids):
