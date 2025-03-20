@@ -5,7 +5,7 @@ physics_engine: ${..physics_engine}
 
 # if given, will override the device setting in gym. 
 env:
-  numEnvs: 8192
+  numEnvs: 16384
   envSpacing: 2.4
   episodeLength: 100
   obsForce: False
@@ -17,7 +17,9 @@ env:
   maxinertia: 10.0
   minstiffness: 100.0
   maxstiffness: 1000.0
-  minfriction: 0.03
+  minmass: 0.1
+  maxmass: 10.0
+  minfriction: 0.06
   maxfriction: 0.6
 
   initfrankaDofNoise: 0.25

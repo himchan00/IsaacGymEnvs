@@ -137,6 +137,7 @@ class FrankaToy(VecTask):
 
         self.up_axis = "z"
         self.up_axis_idx = 2
+        self.mass_min, self.mass_max = self.cfg["env"]["minmass"], self.cfg["env"]["maxmass"]
         self.friction_min, self.friction_max = self.cfg["env"]["minfriction"], self.cfg["env"]["maxfriction"]
         self.inertia_min, self.inertia_max = self.cfg["env"]["mininertia"], self.cfg["env"]["maxinertia"]
         self.stiffness_min, self.stiffness_max = self.cfg["env"]["minstiffness"], self.cfg["env"]["maxstiffness"]
@@ -205,11 +206,7 @@ class FrankaToy(VecTask):
 
         # Create box asset
         box_size = 0.1
-        box_density = 1000
         self._box_init_pos = [0.0, 0.0, 1.0 + table_thickness / 2 + box_size / 2]
-        box_opts = gymapi.AssetOptions()
-        box_opts.density = box_density
-        box_asset = self.gym.create_box(self.sim, *[box_size] * 3, box_opts)
         box_color = gymapi.Vec3(0.6, 0.1, 0.0)
 
         # Set target position, create a target asset
@@ -273,7 +270,8 @@ class FrankaToy(VecTask):
         self.envs = []
     
         # Create environments
-        friction = torch.linspace(self.friction_min, self.friction_max, num_envs, device=self.device)
+        friction = torch.linspace(self.friction_min, self.friction_max, int(np.sqrt(num_envs)), device=self.device)
+        mass = torch.linspace(self.mass_min, self.mass_max, int(np.sqrt(num_envs)), device=self.device)
         for i in range(self.num_envs):
             # create env instance
             env_ptr = self.gym.create_env(self.sim, lower, upper, num_per_row)
@@ -297,12 +295,19 @@ class FrankaToy(VecTask):
             We can set friction here (_create_envs()), but not in reset_idx()  
             because set_actor_rigid_shape_properties() has no effect after calling gym.prepare_sim().
             """
+            j = i // int(np.sqrt(num_envs))
+            k = i % int(np.sqrt(num_envs))
+            box_opts = gymapi.AssetOptions()
+            box_density = 1000 * mass[j]
+            box_opts.density = box_density
+            box_asset = self.gym.create_box(self.sim, *[box_size] * 3, box_opts)
+
             box_actor_handle = self.gym.create_actor(env_ptr, box_asset, box_start_pose, "box", i, 2, 0)
             b_shape_props = self.gym.get_actor_rigid_shape_properties(env_ptr, box_actor_handle)
             # Box actor has only one rigid shape
-            b_shape_props[0].friction = 2 * friction[i]
-            b_shape_props[0].rolling_friction = 2 * friction[i] # Not sure if this is used
-            b_shape_props[0].torsion_friction = 2 * friction[i]
+            b_shape_props[0].friction = 2 * friction[k]
+            b_shape_props[0].rolling_friction = 2 * friction[k] # Not sure if this is used
+            b_shape_props[0].torsion_friction = 2 * friction[k]
             self.gym.set_actor_rigid_shape_properties(env_ptr, box_actor_handle, b_shape_props)
             # Set color
             self.gym.set_rigid_body_color(env_ptr, box_actor_handle, 0, gymapi.MESH_VISUAL, box_color)
