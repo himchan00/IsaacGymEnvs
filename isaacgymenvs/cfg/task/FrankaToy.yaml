@@ -17,10 +17,10 @@ env:
   maxinertia: 10.0
   minstiffness: 100.0
   maxstiffness: 1000.0
-  minmass: 0.1
-  maxmass: 10.0
-  minfriction: 0.06
-  maxfriction: 0.6
+  minmass: 0.3
+  maxmass: 3
+  minfriction: 0.2
+  maxfriction: 0.8
 
   initfrankaDofNoise: 0.25
   initboxPosNoise: 0.1

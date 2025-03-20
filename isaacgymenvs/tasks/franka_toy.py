@@ -270,8 +270,8 @@ class FrankaToy(VecTask):
         self.envs = []
     
         # Create environments
-        friction = torch.linspace(self.friction_min, self.friction_max, int(np.sqrt(num_envs)), device=self.device)
-        mass = torch.linspace(self.mass_min, self.mass_max, int(np.sqrt(num_envs)), device=self.device)
+        friction = torch.exp(torch.linspace(torch.log(self.friction_min), torch.log(self.friction_max), int(np.sqrt(num_envs)), device=self.device))
+        mass = torch.exp(torch.linspace(torch.log(self.mass_min), torch.log(self.mass_max), int(np.sqrt(num_envs)), device=self.device))
         for i in range(self.num_envs):
             # create env instance
             env_ptr = self.gym.create_env(self.sim, lower, upper, num_per_row)
