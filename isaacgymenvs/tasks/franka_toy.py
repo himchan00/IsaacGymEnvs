@@ -405,6 +405,8 @@ class FrankaToy(VecTask):
         is_terminal = (distance < 0.1) & (torch.norm(self.states["box_vel"][:, :2], dim=-1) < 1e-3)
         reward += torch.where(is_terminal, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
         self.rew_buf[:] = reward
+        print(reward[8])
+        print(self.progress_buf[8])
         self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
 
     def compute_observations(self):
@@ -560,6 +562,7 @@ class FrankaToy(VecTask):
 
     def pre_physics_step(self, actions):
         # Control arm (scale value first)
+        is_initial = (self.progress_buf == 0) # At t=0, the states are invalid, so we skip the control step.
         self.actions = actions.clone().to(self.device)
         delta_x_r = self._convert_2D_to_3D(self.actions[:, :2].clone() * 0.2) # Scale the actions by 0.2
         if self.control_type == "position":
@@ -567,7 +570,7 @@ class FrankaToy(VecTask):
             for i in range(self.n_control_loop):
                 # Use OSC for position control
                 delta_x_r = self._pose_to_delta_pose(x_r)
-                self._effort_control = self._compute_osc_torques(dpose=delta_x_r)
+                self._effort_control = self._compute_osc_torques(dpose=delta_x_r) * (1-is_initial.float()).unsqueeze(-1)
                 # Deploy actions
                 self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
                 if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
@@ -583,12 +586,12 @@ class FrankaToy(VecTask):
             min_val = torch.tensor([self.inertia_min, self.stiffness_min], device=self.device)
             max_val = torch.tensor([self.inertia_max, self.stiffness_max], device=self.device)
             control_params = min_val * (max_val / min_val) ** normalized_control_params
-            
             x_r = self._delta_pose_to_pose(delta_x_r)
             x_d = x_r.clone()
             x_r_pos = x_r[:, :2].clone() # (num_envs, 2)
             if self.integration_var == "x_d":
-                self._error -= (x_r_pos - self.x_r_pos_prev)
+                error_initial = is_initial | (self.progress_buf == 1)
+                self._error -= (x_r_pos - self.x_r_pos_prev)*(1-error_initial.float()).unsqueeze(-1)
             self.x_r_pos_prev = x_r_pos
 
             inertia = control_params[:, 0].clone().unsqueeze(-1)  # (num_envs, 1)
@@ -603,7 +606,7 @@ class FrankaToy(VecTask):
                 # Use OSC for position control
                 x_d[:, :2] = x_r[:, :2] + self._error
                 delta_x_d = self._pose_to_delta_pose(x_d)
-                self._effort_control = self._compute_osc_torques(dpose=delta_x_d)
+                self._effort_control = self._compute_osc_torques(dpose=delta_x_d)*(1-is_initial.float()).unsqueeze(-1)
                 # Deploy actions
                 self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
                 if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
@@ -615,7 +618,7 @@ class FrankaToy(VecTask):
                         self._refresh()
 
         elif self.control_type == "osc":
-            self._effort_control = self._compute_osc_torques(dpose=delta_x_r)
+            self._effort_control = self._compute_osc_torques(dpose=delta_x_r)*(1-is_initial.float()).unsqueeze(-1)
 
             # Deploy actions
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))

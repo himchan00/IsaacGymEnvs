@@ -8,7 +8,7 @@ env:
   numEnvs: 16384
   envSpacing: 2.4
   episodeLength: 100
-  obsForce: False
+  obsForce: True
   obsVel: False
   enableDebugVis: False
   clipActions: 1.0
@@ -17,10 +17,10 @@ env:
   maxinertia: 10.0
   minstiffness: 100.0
   maxstiffness: 1000.0
-  minmass: 0.3
-  maxmass: 3
-  minfriction: 0.2
-  maxfriction: 0.8
+  minmass: 0.2
+  maxmass: 1.2
+  minfriction: 0.1
+  maxfriction: 0.6
 
   initfrankaDofNoise: 0.25
   initboxPosNoise: 0.1
