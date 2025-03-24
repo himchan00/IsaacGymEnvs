@@ -405,8 +405,6 @@ class FrankaToy(VecTask):
         is_terminal = (distance < 0.1) & (torch.norm(self.states["box_vel"][:, :2], dim=-1) < 1e-3)
         reward += torch.where(is_terminal, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
         self.rew_buf[:] = reward
-        print(reward[8])
-        print(self.progress_buf[8])
         self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
 
     def compute_observations(self):
