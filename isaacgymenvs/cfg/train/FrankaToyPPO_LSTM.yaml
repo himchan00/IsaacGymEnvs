@@ -12,7 +12,7 @@ params:
 
     space:
       continuous:
-        mu_activation: None
+        mu_activation: tanh
         sigma_activation: None
         mu_init:
           name: default
@@ -67,9 +67,9 @@ params:
     truncate_grads: True
     e_clip: 0.2
     horizon_length: 32
-    minibatch_size: 16384
+    minibatch_size: 4096
     mini_epochs: 5
     critic_coef: 4
     clip_value: True
-    seq_length: 16
+    seq_length: 32
     bounds_loss_coef: 0.0005

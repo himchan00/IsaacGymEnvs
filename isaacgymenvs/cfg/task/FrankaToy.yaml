@@ -5,13 +5,11 @@ physics_engine: ${..physics_engine}
 
 # if given, will override the device setting in gym. 
 env:
-  numEnvs: 16384
+  numEnvs: 4096
   envSpacing: 2.4
-  episodeLength: 100
-  obsForce: True
-  obsVel: False
+  episodeLength: 32
+  obsForce: False
   enableDebugVis: False
-  clipActions: 1.0
 
   mininertia: 1.0
   maxinertia: 10.0
@@ -22,13 +20,12 @@ env:
   minfriction: 0.1
   maxfriction: 0.6
 
-  initfrankaDofNoise: 0.25
-  initboxPosNoise: 0.1
-  boxPosErrorStd: 0.0
+  initfrankaDofNoise: 0.0
+  initboxradius: 0.2
 
   controlType: 'position' # 'osc' or 'admittance' or 'position'
   # Number of compliance control steps per policy step (only used for admittance control)
-  nControlLoop: 10 # Note: Effective dt for the simulation becomes nControlLoop * dt
+  nControlLoop: 30 # Note: Effective dt for the simulation becomes nControlLoop * dt
   integrationVar: "x_d" # 'error' or 'x_d'. If 'error', error = x_d - x_r is continous, else x_d is continous
 
   asset:
@@ -39,7 +36,7 @@ env:
   enableCameraSensors: False
 
 sim:
-  dt: 0.005 # 1/20 for 'osc', 1/20/nControlLoop for 'admittance' and 'position'
+  dt: 0.01667 # 0.5 for 'osc', 0.5/nControlLoop for 'admittance' and 'position'
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}

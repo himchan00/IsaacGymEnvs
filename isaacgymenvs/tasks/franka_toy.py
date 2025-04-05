@@ -82,10 +82,8 @@ class FrankaToy(VecTask):
 
         self.max_episode_length = self.cfg["env"]["episodeLength"]
         self.obs_force = self.cfg["env"]["obsForce"]
-        self.obs_vel = self.cfg["env"]["obsVel"]
         self.init_franka_dof_noise = self.cfg["env"]["initfrankaDofNoise"]
-        self.init_box_pos_noise = self.cfg["env"]["initboxPosNoise"]
-        self.box_pos_error_std = self.cfg["env"]["boxPosErrorStd"]
+        self.init_box_radius = self.cfg["env"]["initboxradius"]
 
         # Controller type
         self.control_type = self.cfg["env"]["controlType"]
@@ -94,12 +92,6 @@ class FrankaToy(VecTask):
         else:
             self.n_control_loop = 1 # This is not used
 
-        # Full obs: eef_pose (2) + eef_vel (2) + eef_force (2) + box_pose (2) + box_vel (2) + box_orientation (2) + box_angular_vel (1)
-        self.cfg["env"]["numObservations"] = 8
-        if self.obs_force:
-            self.cfg["env"]["numObservations"] += 2
-        if self.obs_vel:
-            self.cfg["env"]["numObservations"] += 3
         # actions include: delta EEF (2) + control params (2) for admittance control, delta EEF (2) for position control and osc control
         if self.control_type == "admittance":
             self.cfg["env"]["numActions"] = 4
@@ -110,6 +102,12 @@ class FrankaToy(VecTask):
             self.cfg["env"]["numActions"] = 2
         else:
             raise ValueError("Invalid control type specified. Must be one of: {osc, admittance, position}")
+        
+        # Full obs: eef_pose (2) + eef_vel (2) + eef_force (2) + previous actions
+        self.cfg["env"]["numObservations"] = 4 + self.cfg["env"]["numActions"]
+        if self.obs_force:
+            self.cfg["env"]["numObservations"] += 2
+
 
         # Values to be filled in at runtime
         self.states = {}                        # will be dict filled with relevant states to use for reward calculation
@@ -145,7 +143,7 @@ class FrankaToy(VecTask):
         super().__init__(config=self.cfg, rl_device=rl_device, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless, virtual_screen_capture=virtual_screen_capture, force_render=force_render)
 
         # Franka defaults
-        self.franka_default_dof_pos = to_torch([- (1 / 4) * np.pi, (1 / 8) * np.pi, 0, - (6 / 8) * np.pi, 0, 2.9416, 0], device=self.device)
+        self.franka_default_dof_pos = torch.tensor([-0.9801,  0.8623,  0.9570, -2.1081, -1.0699,  2.3470,  1.6269], device='cuda:0')
 
         # OSC Gains
         self.kp = to_torch([100., 100., 1000, 1000, 1000, 1000], device=self.device) # More weight on z-axis and orientation
@@ -210,7 +208,7 @@ class FrankaToy(VecTask):
         box_color = gymapi.Vec3(0.6, 0.1, 0.0)
 
         # Set target position, create a target asset
-        self._target_pos = [0.8, 0, 1.0]
+        self._target_pos = [-0.1, 0.3, 1.0]
         target_size = 0.1
         target_opts = gymapi.AssetOptions()
         target_opts.fix_base_link = True
@@ -247,7 +245,7 @@ class FrankaToy(VecTask):
 
         # Define start pose for franka
         franka_start_pose = gymapi.Transform()
-        franka_start_pose.p = gymapi.Vec3(-0.45, 0.0, 1.0 + table_thickness / 2)
+        franka_start_pose.p = gymapi.Vec3(-0.55, 0.0, 1.0 + table_thickness / 2)
         franka_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
 
         # Define start pose for table
@@ -407,21 +405,14 @@ class FrankaToy(VecTask):
         self.rew_buf[:] = reward
         self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
 
+
     def compute_observations(self):
         self._refresh()
         eef_obs = ["eef_pos", "eef_vel"]
         if self.obs_force:
             eef_obs.append("eef_force")
-        self.obs_buf = torch.cat([self.states[ob][:, :2] for ob in eef_obs], dim=-1) # Only take x, y components
-        box_pos = self.states["box_pos"][:, :2] # Only take x, y components
-        box_pos += torch.randn_like(box_pos) * self.box_pos_error_std
-        box_orientation_2D = self.states["box_quat"][:, 2:4] # Only take z, w components
-        if self.obs_vel:
-            box_vel = self.states["box_vel"][:, :2] # Only take x, y components
-            box_angular_vel_2D = self.states["box_vel"][:, 5] # Only take z component
-            self.obs_buf = torch.cat([self.obs_buf, box_pos, box_vel, box_orientation_2D, box_angular_vel_2D.unsqueeze(-1)], dim=-1)
-        else:
-            self.obs_buf = torch.cat([self.obs_buf, box_pos, box_orientation_2D], dim=-1)
+        self.obs_buf = torch.cat([self.states[ob][:, :2] for ob in eef_obs], dim=-1)
+        self.obs_buf = torch.cat([self.obs_buf, self.actions], dim = -1)
         return self.obs_buf
 
     def reset_idx(self, env_ids):
@@ -462,9 +453,11 @@ class FrankaToy(VecTask):
         # Randomize the box position & orientation, set the velocity to 0
         # 1. Set position
         pos = torch.zeros((len(env_ids), 3), device=self.device)
-        box_init_pos = torch.tensor(self._box_init_pos, device=self.device)
-        pos[:, :2] = box_init_pos[:2] + self.init_box_pos_noise * 2.0 * (torch.rand((len(env_ids), 2), device=self.device) - 0.5)
-        pos[:, 2] = box_init_pos[2]
+        radius = 0.1 + torch.rand((len(env_ids),), device=self.device) * (self.init_box_radius-0.1) # 0.1 to init_box_radius
+        theta = 2 * math.pi * torch.rand((len(env_ids),), device=self.device)
+        pos[:, 0] = radius * torch.cos(theta)
+        pos[:, 1] = radius * torch.sin(theta)
+        pos[:, 2] = self._box_init_pos[2]
         self._box_state[env_ids, :3] = pos
         # 2. Set orientation
         axis_angle = torch.zeros((len(env_ids), 3), device=self.device)
@@ -557,14 +550,25 @@ class FrankaToy(VecTask):
         delta_pose[:, 3:] = angle.unsqueeze(-1) * axis
         return delta_pose
 
+    def _clip_target(self, x_d):
+        # Clip x_d to be within the worksapce of the robot
+        # The robot base is at (-0.55, 0.0), and the workspace is a circle of radius 0.2 ~ 0.8 centered at the robot base
+        # We also set x > 0
+        robot_base = torch.tensor([[-0.55, 0.0]], device=self.device)
+        d_to_robot_base = torch.norm(x_d[:, :2] - robot_base, dim=-1, keepdim=True)
+        x_d[:, :2] = torch.where(d_to_robot_base > 0.2, x_d[:, :2], robot_base + 0.2 * (x_d[:, :2] - robot_base) / d_to_robot_base)
+        x_d[:, :2] = torch.where(d_to_robot_base < 0.8, x_d[:, :2], robot_base + 0.8 * (x_d[:, :2] - robot_base) / d_to_robot_base)
+        x_d[:, 0] = torch.clamp_min(x_d[:, 0], 0.0)
+        return x_d
 
     def pre_physics_step(self, actions):
         # Control arm (scale value first)
         is_initial = (self.progress_buf == 0) # At t=0, the states are invalid, so we skip the control step.
         self.actions = actions.clone().to(self.device)
-        delta_x_r = self._convert_2D_to_3D(self.actions[:, :2].clone() * 0.2) # Scale the actions by 0.2
+        delta_x_r = self._convert_2D_to_3D(self.actions[:, :2].clone() * 0.1) # Scale the actions by 0.2
         if self.control_type == "position":
             x_r = self._delta_pose_to_pose(delta_x_r)
+            x_r = self._clip_target(x_r)
             for i in range(self.n_control_loop):
                 # Use OSC for position control
                 delta_x_r = self._pose_to_delta_pose(x_r)
@@ -585,6 +589,7 @@ class FrankaToy(VecTask):
             max_val = torch.tensor([self.inertia_max, self.stiffness_max], device=self.device)
             control_params = min_val * (max_val / min_val) ** normalized_control_params
             x_r = self._delta_pose_to_pose(delta_x_r)
+            x_r = self._clip_target(x_r)
             x_d = x_r.clone()
             x_r_pos = x_r[:, :2].clone() # (num_envs, 2)
             if self.integration_var == "x_d":
