@@ -25,7 +25,7 @@ env:
 
   controlType: 'position' # 'osc' or 'admittance' or 'position'
   # Number of compliance control steps per policy step (only used for admittance control)
-  nControlLoop: 30 # Note: Effective dt for the simulation becomes nControlLoop * dt
+  nControlLoop: 10 # Note: Effective dt for the simulation becomes nControlLoop * dt
   integrationVar: "x_d" # 'error' or 'x_d'. If 'error', error = x_d - x_r is continous, else x_d is continous
 
   asset:
@@ -36,7 +36,7 @@ env:
   enableCameraSensors: False
 
 sim:
-  dt: 0.01667 # 0.5 for 'osc', 0.5/nControlLoop for 'admittance' and 'position'
+  dt: 0.05 # 0.5 for 'osc', 0.5/nControlLoop for 'admittance' and 'position'
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
