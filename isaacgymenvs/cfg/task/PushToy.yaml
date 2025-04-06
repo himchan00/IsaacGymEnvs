@@ -19,18 +19,18 @@ env:
   minfriction: 0.1
   maxfriction: 0.6
 
-  initobjradius: 0.2
+  initobjradius: [0.2, 0.4]
 
   controlType: 'velocity' # 'velocity' or 'admittance'
   # Number of compliance control steps per policy step (only used for admittance control)
-  nControlLoop: 10 # Note: Effective dt for the simulation becomes nControlLoop * dt
+  nControlLoop: 5 # Note: Effective dt for the simulation becomes nControlLoop * dt
   integrationVar: "x_d" # 'error' or 'x_d'. If 'error', error = x_d - x_r is continous, else x_d is continous
 
   # set to True if you use camera sensors in the environment
   enableCameraSensors: False
 
 sim:
-  dt: 0.05 # 0.5/nControlLoop
+  dt: 0.1 # 0.5/nControlLoop
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}

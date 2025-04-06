@@ -36,9 +36,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.
 from isaacgym import gymtorch
 from isaacgym import gymapi
 
-from isaacgymenvs.utils.torch_jit_utils import to_torch, tensor_clamp, quat_conjugate, quat_to_angle_axis, quat_mul, quat_axis
 from isaacgymenvs.tasks.base.vec_task import VecTask
-import gym
 
 @torch.jit.script
 def axisangle2quat(vec, eps=1e-6):
@@ -103,7 +101,6 @@ class PushToy(VecTask):
         # Values to be filled in at runtime
         self.states = {}                        # will be dict filled with relevant states to use for reward calculation
         self.handles = {}                       # will be dict mapping names to relevant sim handles
-        self.num_dofs = None                    # Total number of DOFs per env
         self.actions = None                     # Current actions to be deployed
         self._error = None                      # x_d(t) - x_r(t) for admittance control
         self._error_dot = None                  # x_d'(t) - x_r'(t)(=0) for admittance control
@@ -112,16 +109,9 @@ class PushToy(VecTask):
 
         # Tensor placeholders
         self._root_state = None                 # State of root body        (n_envs, 13)
-        self._dof_state = None                  # State of all joints       (n_envs, n_dof)
-        self._q = None                          # Joint positions           (n_envs, n_dof)
-        self._qd = None                         # Joint velocities          (n_envs, n_dof)
         self._rigid_body_state = None           # State of all rigid bodies             (n_envs, n_bodies, 13)
-        self._contact_forces = None             # Contact forces in sim
         self._eef_state = None                  # end effector state
-        self._j_eef = None                      # Jacobian for end effector
-        self._mm = None                         # Mass matrix
-        self._effort_control = None             # Torque actions
-        self._franka_effort_limits = None         # Actuator effort limits for franka
+        self._obj_state = None                  # object state
         self._global_indices = None             # Unique indices corresponding to all envs in flattened array
 
         self.up_axis = "z"
@@ -185,7 +175,7 @@ class PushToy(VecTask):
         obj_color = gymapi.Vec3(0.6, 0.1, 0.0)
 
         # Set target position, create a target asset
-        self._target_pos = [-0.1, 0.3, 1.0]
+        self._target_pos = [0.6, 0.0, 1.0]
         target_size = 0.1
         target_opts = gymapi.AssetOptions()
         target_opts.fix_base_link = True
@@ -331,12 +321,17 @@ class PushToy(VecTask):
         distance = torch.norm(self.states["obj_pos"][:, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
         delta_distance = distance - self.distance_prev
         self.distance_prev = distance
-        reward = -delta_distance/self.dt/self.n_control_loop
+        reward = -delta_distance * 10
         # Success when the object is close to the target & velocity is zero
-        is_terminal = (distance < 0.1) & (torch.norm(self.states["obj_vel"][:, :2], dim=-1) < 1e-3)
-        reward += torch.where(is_terminal, torch.tensor(10.0, device=self.device), torch.tensor(0., device=self.device))
+        is_success = (distance < 0.1) & (torch.norm(self.states["obj_vel"][:, :2], dim=-1) < 1e-3)
+        reward += torch.where(is_success, torch.tensor(10.0, device=self.device), torch.tensor(0., device=self.device))
+        # Fail when eef is too far from the origin
+        eef_pos = self.states["eef_pos"][:, :2]
+        eef_distance = torch.norm(eef_pos, dim=-1)
+        is_fail = (eef_distance > 1.0)
+        reward += torch.where(is_fail, torch.tensor(-1.0, device=self.device), torch.tensor(0., device=self.device))
         self.rew_buf[:] = reward
-        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
+        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_success | is_fail, torch.ones_like(self.reset_buf), self.reset_buf)
 
 
     def compute_observations(self):
@@ -360,14 +355,14 @@ class PushToy(VecTask):
         self._eef_state[env_ids, :3] = torch.tensor(self._eef_init_pos, device=self.device)
         axis_angle_e = torch.zeros((len(env_ids), 3), device=self.device)
         axis_angle_e[:, 2] = math.pi * (2 * torch.rand((len(env_ids),), device=self.device) - 1) # rotate around z axis by -pi to pi
-        quat = axisangle2quat(axis_angle_e)
-        self._eef_state[env_ids, 3:7] = quat
+        quat_e = axisangle2quat(axis_angle_e)
+        self._eef_state[env_ids, 3:7] = quat_e
         self._eef_state[env_ids, 7:] = torch.zeros((len(env_ids), 6), device=self.device)
 
         # Randomize the object position & orientation, set the velocity to 0
         # 1. Set position
         pos = torch.zeros((len(env_ids), 3), device=self.device)
-        radius = 0.1 + torch.rand((len(env_ids),), device=self.device) * (self.init_obj_radius-0.1) # 0.1 to init_obj_radius
+        radius = self.init_obj_radius[0] + torch.rand((len(env_ids),), device=self.device) * (self.init_obj_radius[1]-self.init_obj_radius[0])
         theta = 2 * math.pi * torch.rand((len(env_ids),), device=self.device)
         pos[:, 0] = radius * torch.cos(theta)
         pos[:, 1] = radius * torch.sin(theta)
@@ -376,16 +371,16 @@ class PushToy(VecTask):
         # 2. Set orientation
         axis_angle_o = torch.zeros((len(env_ids), 3), device=self.device)
         axis_angle_o[:, 2] = math.pi * (2 * torch.rand((len(env_ids),), device=self.device) - 1) # rotate around z axis by -pi to pi
-        quat = axisangle2quat(axis_angle_o)
-        self._obj_state[env_ids, 3:7] = quat
+        quat_0 = axisangle2quat(axis_angle_o)
+        self._obj_state[env_ids, 3:7] = quat_0
         # 3. Set velocity
         self._obj_state[env_ids, 7:] = torch.zeros((len(env_ids), 6), device=self.device)
 
-        # Update eef and cube states
-        multi_env_ids_cubes_int32 = self._global_indices[env_ids, 1:3].flatten()
+        # Update eef and obj states
+        update_ids = self._global_indices[env_ids, 1:3].flatten()
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim, gymtorch.unwrap_tensor(self._root_state),
-            gymtorch.unwrap_tensor(multi_env_ids_cubes_int32), len(multi_env_ids_cubes_int32))
+            gymtorch.unwrap_tensor(update_ids), len(update_ids))
 
         # Initialize distance_prev
         self.distance_prev[env_ids] = torch.norm(self._obj_state[env_ids, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
@@ -399,18 +394,18 @@ class PushToy(VecTask):
         # Control arm (scale value first)
         not_initial = (self.progress_buf != 0) # At t=0, the states are invalid, so we skip the control step.
         self.actions = actions.clone().to(self.device)
-        v_xy_r = self.actions[:, :2].clone()
-        v_theta_r = self.actions[:, 2].clone() 
+        v_xy_r = self.actions[:, :2].clone() * 0.1 # Scale the action with a factor of 0.1
+        v_theta_r = self.actions[:, 2].clone() * 0.5 # Scale the action with a factor of 0.5
         if self.control_type == "velocity":
             v_r = torch.zeros((self.num_envs, 6), device=self.device)
             v_r[:, :2] = v_xy_r
             v_r[:, 5] = v_theta_r
             self._eef_state[:, 7:] = v_r
-            ids_eef_int32 = self._global_indices[not_initial, 1].flatten()
-            if len(ids_eef_int32) > 0:
+            update_ids = self._global_indices[not_initial, 1].flatten()
+            if len(update_ids) > 0:
                 self.gym.set_actor_root_state_tensor_indexed(
                     self.sim, gymtorch.unwrap_tensor(self._root_state),
-                gymtorch.unwrap_tensor(ids_eef_int32), len(ids_eef_int32))
+                gymtorch.unwrap_tensor(update_ids), len(update_ids))
             # Initialize force torque history
             self.ft_history = torch.zeros((self.num_envs, 3 * self.n_control_loop), device=self.device)
             for i in range(self.n_control_loop):
