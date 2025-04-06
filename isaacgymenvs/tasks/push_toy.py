@@ -81,26 +81,23 @@ class PushToy(VecTask):
         self.cfg = cfg
 
         self.max_episode_length = self.cfg["env"]["episodeLength"]
-        self.obs_force = self.cfg["env"]["obsForce"]
-        self.init_box_radius = self.cfg["env"]["initboxradius"]
+        self.init_obj_radius = self.cfg["env"]["initobjradius"]
 
         # Controller type
         self.control_type = self.cfg["env"]["controlType"] # admittance, velocity
         self.n_control_loop = self.cfg["env"]["nControlLoop"]
 
-        # actions include: delta EEF (2) + control params (2) for admittance control, delta EEF (2) for velocity control
+        # actions include: delta EEF (3) + control params (2) for admittance control, delta EEF (3) for velocity control
         if self.control_type == "admittance":
-            self.cfg["env"]["numActions"] = 4
+            self.cfg["env"]["numActions"] = 5
             self.integration_var = self.cfg["env"]["integrationVar"]
         elif self.control_type == "velocity":
-            self.cfg["env"]["numActions"] = 2
+            self.cfg["env"]["numActions"] = 3
         else:
             raise ValueError("Invalid control type specified. Must be one of: {admittance, velocity}")
         
-        # Full obs: eef_pose (2) + eef_vel (2) + eef_force (2) + previous actions
-        self.cfg["env"]["numObservations"] = 4 + self.cfg["env"]["numActions"]
-        if self.obs_force:
-            self.cfg["env"]["numObservations"] += 2
+        # Full obs: eef_pose (4) + eef_vel (3) + eef_ft (3 * n_control_loop) 
+        self.cfg["env"]["numObservations"] = 7 + 3 * self.n_control_loop
 
 
         # Values to be filled in at runtime
@@ -111,7 +108,7 @@ class PushToy(VecTask):
         self._error = None                      # x_d(t) - x_r(t) for admittance control
         self._error_dot = None                  # x_d'(t) - x_r'(t)(=0) for admittance control
         self.x_r_pos_prev = None                # x, y component of x_r(t-1) is required when integrationVar is x_d
-        self.distance_prev = None               # 2D distance between box and target at t-1. Required for reward calculation
+        self.distance_prev = None               # 2D distance between object and target at t-1. Required for reward calculation
 
         # Tensor placeholders
         self._root_state = None                 # State of root body        (n_envs, 13)
@@ -148,7 +145,6 @@ class PushToy(VecTask):
         self.sim_params.gravity.x = 0
         self.sim_params.gravity.y = 0
         self.sim_params.gravity.z = -9.81
-        self.sim_params.physx.contact_collection = gymapi.ContactCollection.CC_ALL_SUBSTEPS
         self.sim = super().create_sim(self.device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
         self._create_ground_plane()
         self._create_envs(self.num_envs, self.cfg["env"]['envSpacing'], int(np.sqrt(self.num_envs)))
@@ -170,22 +166,23 @@ class PushToy(VecTask):
         table_asset = self.gym.create_box(self.sim, *[2.4, 2.4, table_thickness], table_opts)
 
         # Create eef asset
-        eef_radius = 0.05
-        eef_width = 0.3
-        self._eef_init_pos = [0.0, 0.0, 1.0 + table_thickness / 2 + eef_width + 0.05] # 0.05 margin
+        eef_size = [0.2, 0.05, 0.2]
+        self._eef_init_pos = [0.0, 0.0, 1.0 + table_thickness / 2 + eef_size[2]/2 + 0.02] # 0.02 margin
         eef_opts = gymapi.AssetOptions()
         eef_opts.density = 10e8 # Set density to a very high value to make it fixed
         eef_opts.disable_gravity = True
-        eef_asset = self.gym.create_capsule(self.sim, eef_radius, eef_width, eef_opts)
+        eef_asset = self.gym.create_box(self.sim, *eef_size, eef_opts)
         eef_color = gymapi.Vec3(0.0, 0.0, 0.6)
-        eef_idx = self.gym.find_asset_rigid_body_index(eef_asset, "capsule")
+        eef_idx = self.gym.find_asset_rigid_body_index(eef_asset, "box")
         sensor_pose = gymapi.Transform(gymapi.Vec3(0.0, 0.0, 0.0))
-        self.ftsensor_idx = self.gym.create_asset_force_sensor(eef_asset, eef_idx, sensor_pose)
+        sensor_prop = gymapi.ForceSensorProperties()
+        sensor_prop.use_world_frame = True
+        self.ftsensor_idx = self.gym.create_asset_force_sensor(eef_asset, eef_idx, sensor_pose, sensor_prop)
 
-        # Create box asset
-        box_size = 0.1
-        self._box_init_pos = [0.0, 0.0, 1.0 + table_thickness / 2 + box_size / 2]
-        box_color = gymapi.Vec3(0.6, 0.1, 0.0)
+        # Create obj asset
+        obj_size = 0.1
+        self._obj_init_pos = [0.0, 0.0, 1.0 + table_thickness / 2 + obj_size / 2]
+        obj_color = gymapi.Vec3(0.6, 0.1, 0.0)
 
         # Set target position, create a target asset
         self._target_pos = [-0.1, 0.3, 1.0]
@@ -204,12 +201,12 @@ class PushToy(VecTask):
         # Define start pose for eef
         eef_start_pose = gymapi.Transform()
         eef_start_pose.p = gymapi.Vec3(*self._eef_init_pos)
-        eef_start_pose.r = gymapi.Quat(0.0, np.sqrt(0.5), 0.0, np.sqrt(0.5)) # 90 degree rotation around y axis
+        eef_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
 
-        # Define start pose for box
-        box_start_pose = gymapi.Transform()
-        box_start_pose.p = gymapi.Vec3(*self._box_init_pos)
-        box_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
+        # Define start pose for object
+        obj_start_pose = gymapi.Transform()
+        obj_start_pose.p = gymapi.Vec3(*self._obj_init_pos)
+        obj_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
 
         # Define start pose for target
         target_start_pose = gymapi.Transform()
@@ -230,7 +227,7 @@ class PushToy(VecTask):
             # Create table
             table_actor_handle = self.gym.create_actor(env_ptr, table_asset, table_start_pose, "table", i, 0, 0)
             t_shape_props = self.gym.get_actor_rigid_shape_properties(env_ptr, table_actor_handle)
-            # set coeffecient of friction of the table to 0 for easy debugging (Effective friction coefficient is 0.5*box_friction)
+            # set coeffecient of friction of the table to 0 for easy debugging (Effective friction coefficient is 0.5*obj_friction)
             t_shape_props[0].friction = 0.
             t_shape_props[0].rolling_friction = 0. # Not sure if this is used
             t_shape_props[0].torsion_friction = 0.
@@ -239,8 +236,13 @@ class PushToy(VecTask):
             # Create eef
             eef_actor_handle = self.gym.create_actor(env_ptr, eef_asset, eef_start_pose, "eef", i, 1, 0)
             self.gym.set_rigid_body_color(env_ptr, eef_actor_handle, 0, gymapi.MESH_VISUAL, eef_color)
+            e_shape_props = self.gym.get_actor_rigid_shape_properties(env_ptr, eef_actor_handle)
+            e_shape_props[0].friction = 0.0
+            e_shape_props[0].rolling_friction = 0.0 # Not sure if this is used
+            e_shape_props[0].torsion_friction = 0.0
+            self.gym.set_actor_rigid_shape_properties(env_ptr, eef_actor_handle, e_shape_props)
 
-            # Create box
+            # Create object
             """
             @@@@@@@@@@@@@@@@@@@@@@@@@@@Problem@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
             We can set friction here (_create_envs()), but not in reset_idx()  
@@ -248,19 +250,19 @@ class PushToy(VecTask):
             """
             j = i // int(np.sqrt(num_envs))
             k = i % int(np.sqrt(num_envs))
-            box_opts = gymapi.AssetOptions()
-            box_density = 1000 * mass[j]
-            box_opts.density = box_density
-            box_asset = self.gym.create_box(self.sim, *[box_size] * 3, box_opts)
+            obj_opts = gymapi.AssetOptions()
+            obj_density = 1000 * mass[j]
+            obj_opts.density = obj_density
+            obj_asset = self.gym.create_box(self.sim, *[obj_size] * 3, obj_opts)
 
-            box_actor_handle = self.gym.create_actor(env_ptr, box_asset, box_start_pose, "box", i, 2, 0)
-            b_shape_props = self.gym.get_actor_rigid_shape_properties(env_ptr, box_actor_handle)
-            # Box actor has only one rigid shape
-            b_shape_props[0].friction = 2 * friction[k]
-            b_shape_props[0].rolling_friction = 2 * friction[k] # Not sure if this is used
-            b_shape_props[0].torsion_friction = 2 * friction[k]
-            self.gym.set_actor_rigid_shape_properties(env_ptr, box_actor_handle, b_shape_props)
-            self.gym.set_rigid_body_color(env_ptr, box_actor_handle, 0, gymapi.MESH_VISUAL, box_color)
+            obj_actor_handle = self.gym.create_actor(env_ptr, obj_asset, obj_start_pose, "obj", i, 2, 0)
+            o_shape_props = self.gym.get_actor_rigid_shape_properties(env_ptr, obj_actor_handle)
+            # obj actor has only one rigid shape
+            o_shape_props[0].friction = 2 * friction[k]
+            o_shape_props[0].rolling_friction = 2 * friction[k] # Not sure if this is used
+            o_shape_props[0].torsion_friction = 2 * friction[k]
+            self.gym.set_actor_rigid_shape_properties(env_ptr, obj_actor_handle, o_shape_props)
+            self.gym.set_rigid_body_color(env_ptr, obj_actor_handle, 0, gymapi.MESH_VISUAL, obj_color)
 
             # Create target
             target_actor_handle = self.gym.create_actor(env_ptr, target_asset, target_start_pose, "target", i, 3, 1)
@@ -276,25 +278,23 @@ class PushToy(VecTask):
         # Setup sim handles
         env_ptr = self.envs[0]
         eef_actor_handle = self.gym.find_actor_handle(env_ptr, "eef")
-        box_actor_handle = self.gym.find_actor_handle(env_ptr, "box")
+        obj_actor_handle = self.gym.find_actor_handle(env_ptr, "obj")
         self.handles = {
-            "eef": self.gym.find_actor_rigid_body_handle(env_ptr, eef_actor_handle, "capsule"),
-            "box": self.gym.find_actor_rigid_body_handle(env_ptr, box_actor_handle, "box"),
+            "eef": self.gym.find_actor_rigid_body_handle(env_ptr, eef_actor_handle, "box"),
+            "obj": self.gym.find_actor_rigid_body_handle(env_ptr, obj_actor_handle, "box"),
         }
 
         # Setup tensor buffers
         _actor_root_state_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
         _rigid_body_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
-        _contact_forces_tensor = self.gym.acquire_net_contact_force_tensor(self.sim)
         _fsdata = self.gym.acquire_force_sensor_tensor(self.sim)
 
         self._root_state = gymtorch.wrap_tensor(_actor_root_state_tensor).view(self.num_envs, -1, 13)
         self._rigid_body_state = gymtorch.wrap_tensor(_rigid_body_state_tensor).view(self.num_envs, -1, 13)
-        self._contact_forces = gymtorch.wrap_tensor(_contact_forces_tensor).view(self.num_envs, -1, 3)
         self._fsdata = gymtorch.wrap_tensor(_fsdata).view(self.num_envs, -1, 6)
 
         self._eef_state = self._root_state[:, eef_actor_handle, :]
-        self._box_state = self._root_state[:, box_actor_handle, :]
+        self._obj_state = self._root_state[:, obj_actor_handle, :]
 
         # Initialize actions
         self._error = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
@@ -312,42 +312,42 @@ class PushToy(VecTask):
             "eef_pos": self._eef_state[:, :3],
             "eef_quat": self._eef_state[:, 3:7],
             "eef_vel": self._eef_state[:, 7:],
-            "eef_force": self._contact_forces[:, self.handles['eef']],
             "eef_ft": self._fsdata[:, self.ftsensor_idx, :],
-            # Box
-            "box_pos": self._box_state[:, :3],
-            "box_quat": self._box_state[:, 3:7],
-            "box_vel": self._box_state[:, 7:],
+            # object
+            "obj_pos": self._obj_state[:, :3],
+            "obj_quat": self._obj_state[:, 3:7],
+            "obj_vel": self._obj_state[:, 7:],
         })
 
     def _refresh(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
-        self.gym.refresh_net_contact_force_tensor(self.sim)
         self.gym.refresh_force_sensor_tensor(self.sim)
         # Refresh states
         self._update_states()
 
     def compute_reward(self, actions):
-        # Compute current 2D distance between box and target
-        distance = torch.norm(self.states["box_pos"][:, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
+        # Compute current 2D distance between object and target
+        distance = torch.norm(self.states["obj_pos"][:, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
         delta_distance = distance - self.distance_prev
         self.distance_prev = distance
         reward = -delta_distance/self.dt/self.n_control_loop
-        # Success when the box is close to the target & velocity is zero
-        is_terminal = (distance < 0.1) & (torch.norm(self.states["box_vel"][:, :2], dim=-1) < 1e-3)
-        reward += torch.where(is_terminal, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
+        # Success when the object is close to the target & velocity is zero
+        is_terminal = (distance < 0.1) & (torch.norm(self.states["obj_vel"][:, :2], dim=-1) < 1e-3)
+        reward += torch.where(is_terminal, torch.tensor(10.0, device=self.device), torch.tensor(0., device=self.device))
         self.rew_buf[:] = reward
         self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
 
 
     def compute_observations(self):
         self._refresh()
-        eef_obs = ["eef_pos", "eef_vel"]
-        if self.obs_force:
-            eef_obs.append("eef_force")
-        self.obs_buf = torch.cat([self.states[ob][:, :2] for ob in eef_obs], dim=-1)
-        self.obs_buf = torch.cat([self.obs_buf, self.actions], dim = -1)
+        eef_pos = self.states["eef_pos"][:, :2]
+        eef_orient = self.states["eef_quat"][:, 2:4] # 2D rotation around z axis
+        eef_vel = self.states["eef_vel"][:, :2]
+        eef_angular_vel = self.states["eef_vel"][:, 5].unsqueeze(-1) # 2D angular velocity around z axis
+        self.ft_history[:, -3:] = torch.cat([self.states["eef_ft"][:, :2], self.states["eef_ft"][:, 5].unsqueeze(-1)], dim=-1) 
+        self.obs_buf = torch.cat([eef_pos, eef_orient, eef_vel, eef_angular_vel, self.ft_history], dim=-1)
+        # self.obs_buf = torch.cat([self.obs_buf, self.actions], dim = -1) # No need to include actions since we are using velocity control
         return self.obs_buf
 
     def reset_idx(self, env_ids):
@@ -358,25 +358,28 @@ class PushToy(VecTask):
 
         # Reset the EEF state
         self._eef_state[env_ids, :3] = torch.tensor(self._eef_init_pos, device=self.device)
-        self._eef_state[env_ids, 3:7] = torch.tensor([0.0, np.sqrt(0.5), 0.0, np.sqrt(0.5)], dtype=torch.float, device=self.device) # 90 degree rotation around y axis
+        axis_angle_e = torch.zeros((len(env_ids), 3), device=self.device)
+        axis_angle_e[:, 2] = math.pi * (2 * torch.rand((len(env_ids),), device=self.device) - 1) # rotate around z axis by -pi to pi
+        quat = axisangle2quat(axis_angle_e)
+        self._eef_state[env_ids, 3:7] = quat
         self._eef_state[env_ids, 7:] = torch.zeros((len(env_ids), 6), device=self.device)
 
-        # Randomize the box position & orientation, set the velocity to 0
+        # Randomize the object position & orientation, set the velocity to 0
         # 1. Set position
         pos = torch.zeros((len(env_ids), 3), device=self.device)
-        radius = 0.1 + torch.rand((len(env_ids),), device=self.device) * (self.init_box_radius-0.1) # 0.1 to init_box_radius
+        radius = 0.1 + torch.rand((len(env_ids),), device=self.device) * (self.init_obj_radius-0.1) # 0.1 to init_obj_radius
         theta = 2 * math.pi * torch.rand((len(env_ids),), device=self.device)
         pos[:, 0] = radius * torch.cos(theta)
         pos[:, 1] = radius * torch.sin(theta)
-        pos[:, 2] = self._box_init_pos[2]
-        self._box_state[env_ids, :3] = pos
+        pos[:, 2] = self._obj_init_pos[2]
+        self._obj_state[env_ids, :3] = pos
         # 2. Set orientation
-        axis_angle = torch.zeros((len(env_ids), 3), device=self.device)
-        axis_angle[:, 2] = math.pi * (2 * torch.rand((len(env_ids),), device=self.device) - 1) # rotate around z axis by -pi to pi
-        quat = axisangle2quat(axis_angle)
-        self._box_state[env_ids, 3:7] = quat
+        axis_angle_o = torch.zeros((len(env_ids), 3), device=self.device)
+        axis_angle_o[:, 2] = math.pi * (2 * torch.rand((len(env_ids),), device=self.device) - 1) # rotate around z axis by -pi to pi
+        quat = axisangle2quat(axis_angle_o)
+        self._obj_state[env_ids, 3:7] = quat
         # 3. Set velocity
-        self._box_state[env_ids, 7:] = torch.zeros((len(env_ids), 6), device=self.device)
+        self._obj_state[env_ids, 7:] = torch.zeros((len(env_ids), 6), device=self.device)
 
         # Update eef and cube states
         multi_env_ids_cubes_int32 = self._global_indices[env_ids, 1:3].flatten()
@@ -385,7 +388,7 @@ class PushToy(VecTask):
             gymtorch.unwrap_tensor(multi_env_ids_cubes_int32), len(multi_env_ids_cubes_int32))
 
         # Initialize distance_prev
-        self.distance_prev[env_ids] = torch.norm(self._box_state[env_ids, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
+        self.distance_prev[env_ids] = torch.norm(self._obj_state[env_ids, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
 
         # Set the progress and reset buffers
         self.progress_buf[env_ids] = 0
@@ -396,16 +399,20 @@ class PushToy(VecTask):
         # Control arm (scale value first)
         not_initial = (self.progress_buf != 0) # At t=0, the states are invalid, so we skip the control step.
         self.actions = actions.clone().to(self.device)
-        v_xy_r = self.actions[:, :2].clone() 
+        v_xy_r = self.actions[:, :2].clone()
+        v_theta_r = self.actions[:, 2].clone() 
         if self.control_type == "velocity":
             v_r = torch.zeros((self.num_envs, 6), device=self.device)
             v_r[:, :2] = v_xy_r
+            v_r[:, 5] = v_theta_r
             self._eef_state[:, 7:] = v_r
             ids_eef_int32 = self._global_indices[not_initial, 1].flatten()
             if len(ids_eef_int32) > 0:
                 self.gym.set_actor_root_state_tensor_indexed(
                     self.sim, gymtorch.unwrap_tensor(self._root_state),
                 gymtorch.unwrap_tensor(ids_eef_int32), len(ids_eef_int32))
+            # Initialize force torque history
+            self.ft_history = torch.zeros((self.num_envs, 3 * self.n_control_loop), device=self.device)
             for i in range(self.n_control_loop):
                 if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
                     # step physics and render each frame
@@ -414,6 +421,8 @@ class PushToy(VecTask):
                             self.render()
                         self.gym.simulate(self.sim)
                         self._refresh()
+                        # Update 2D force torque history F_x, F_y, T_z
+                        self.ft_history[:, i*3:(i+1)*3] = torch.cat([self.states["eef_ft"][:, :2], self.states["eef_ft"][:, 5].unsqueeze(-1)], dim=-1) 
                        
         elif self.control_type == "admittance":
             """

@@ -8,7 +8,6 @@ env:
   numEnvs: 4096
   envSpacing: 2.4
   episodeLength: 32
-  obsForce: True
   enableDebugVis: False
 
   mininertia: 1.0
@@ -20,8 +19,7 @@ env:
   minfriction: 0.1
   maxfriction: 0.6
 
-  initfrankaDofNoise: 0.0
-  initboxradius: 0.2
+  initobjradius: 0.2
 
   controlType: 'velocity' # 'velocity' or 'admittance'
   # Number of compliance control steps per policy step (only used for admittance control)
@@ -32,7 +30,7 @@ env:
   enableCameraSensors: False
 
 sim:
-  dt: 0.05 # 0.5 for 'osc', 0.5/nControlLoop for 'admittance' and 'position'
+  dt: 0.05 # 0.5/nControlLoop
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}

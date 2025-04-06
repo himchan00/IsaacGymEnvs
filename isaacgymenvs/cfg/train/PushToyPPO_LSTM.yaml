@@ -72,4 +72,4 @@ params:
     critic_coef: 4
     clip_value: True
     seq_length: 32
-    bounds_loss_coef: 0.0005
+    bounds_loss_coef: 0.0
