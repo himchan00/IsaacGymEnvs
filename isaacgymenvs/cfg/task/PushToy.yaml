@@ -5,7 +5,7 @@ physics_engine: ${..physics_engine}
 
 # if given, will override the device setting in gym. 
 env:
-  numEnvs: 4096
+  numEnvs: 256
   envSpacing: 2.4
   episodeLength: 128
   enableDebugVis: False
@@ -19,9 +19,11 @@ env:
 
   controlType: 'velocity' 
   nControlLoop: 5 # Note: Effective dt for the simulation becomes nControlLoop * dt
+  camWidth: 128
+  camHeight: 128
 
   # set to True if you use camera sensors in the environment
-  enableCameraSensors: False
+  enableCameraSensors: True
 
 sim:
   dt: 0.1 # 0.5/nControlLoop

@@ -84,6 +84,8 @@ class PushToy(VecTask):
         # Controller type
         self.control_type = self.cfg["env"]["controlType"] # velocity
         self.n_control_loop = self.cfg["env"]["nControlLoop"]
+        self.cam_width = self.cfg["env"]["camWidth"]
+        self.cam_height = self.cfg["env"]["camHeight"]
 
         # delta EEF (3) for velocity control
         if self.control_type == "velocity":
@@ -91,13 +93,11 @@ class PushToy(VecTask):
         else:
             raise ValueError("Invalid control type specified. Only 'velocity' is supported.")
         
-        # Full obs: eef_pose (4) + eef_vel (3) + eef_ft (3 * n_control_loop) 
-        self.cfg["env"]["numObservations"] = 7 + 3 * self.n_control_loop
-
+        # Full obs: eef_pose (4) + eef_vel (3) + depth image (height*width)
+        self.cfg["env"]["numObservations"] = 7 + self.cam_width * self.cam_height
 
         # Values to be filled in at runtime
         self.states = {}                        # will be dict filled with relevant states to use for reward calculation
-        self.handles = {}                       # will be dict mapping names to relevant sim handles
         self.actions = None                     # Current actions to be deployed
         self.distance_prev = None               # 2D distance between object and target at t-1. Required for reward calculation
 
@@ -155,11 +155,6 @@ class PushToy(VecTask):
         eef_opts.disable_gravity = True
         eef_asset = self.gym.create_box(self.sim, *eef_size, eef_opts)
         eef_color = gymapi.Vec3(0.0, 0.0, 0.6)
-        eef_idx = self.gym.find_asset_rigid_body_index(eef_asset, "box")
-        sensor_pose = gymapi.Transform(gymapi.Vec3(0.0, 0.0, 0.0))
-        sensor_prop = gymapi.ForceSensorProperties()
-        sensor_prop.use_world_frame = True
-        self.ftsensor_idx = self.gym.create_asset_force_sensor(eef_asset, eef_idx, sensor_pose, sensor_prop)
 
         # Create obj asset
         obj_size = 0.1
@@ -196,6 +191,12 @@ class PushToy(VecTask):
         target_start_pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
 
         # The reference code uses aggregate mode for performance reasons, but we omit it here for simplicity
+
+        # Camera settings
+        camera_props = gymapi.CameraProperties()
+        camera_props.width = self.cam_width
+        camera_props.height = self.cam_height
+        camera_props.enable_tensors = True
 
         self.envs = []
     
@@ -249,6 +250,15 @@ class PushToy(VecTask):
             # Create target
             target_actor_handle = self.gym.create_actor(env_ptr, target_asset, target_start_pose, "target", i, 3, 1)
             self.gym.set_rigid_body_color(env_ptr, target_actor_handle, 0, gymapi.MESH_VISUAL, target_color)
+
+            # Create camera
+            camera_handle = self.gym.create_camera_sensor(env_ptr, camera_props)
+            local_transform = gymapi.Transform()
+            local_transform.p = gymapi.Vec3(0.0, 0.1, 0.2)
+            local_transform.r = gymapi.Quat(-0.5, 0.5, 0.5, 0.5) # Rotate the camera to look at the object
+            eef_body_handle = self.gym.find_actor_rigid_body_handle(env_ptr, eef_actor_handle, "box")
+            self.gym.attach_camera_to_body(camera_handle, env_ptr, eef_body_handle, local_transform, gymapi.FOLLOW_TRANSFORM)
+
             # Store the created env pointers
             self.envs.append(env_ptr)
             
@@ -261,22 +271,24 @@ class PushToy(VecTask):
         env_ptr = self.envs[0]
         eef_actor_handle = self.gym.find_actor_handle(env_ptr, "eef")
         obj_actor_handle = self.gym.find_actor_handle(env_ptr, "obj")
-        self.handles = {
-            "eef": self.gym.find_actor_rigid_body_handle(env_ptr, eef_actor_handle, "box"),
-            "obj": self.gym.find_actor_rigid_body_handle(env_ptr, obj_actor_handle, "box"),
-        }
 
         # Setup tensor buffers
         _actor_root_state_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
         _rigid_body_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
-        _fsdata = self.gym.acquire_force_sensor_tensor(self.sim)
 
         self._root_state = gymtorch.wrap_tensor(_actor_root_state_tensor).view(self.num_envs, -1, 13)
         self._rigid_body_state = gymtorch.wrap_tensor(_rigid_body_state_tensor).view(self.num_envs, -1, 13)
-        self._fsdata = gymtorch.wrap_tensor(_fsdata).view(self.num_envs, -1, 6)
 
         self._eef_state = self._root_state[:, eef_actor_handle, :]
         self._obj_state = self._root_state[:, obj_actor_handle, :]
+
+        # Setup image tensor
+        self._camera_tensor_list = []
+        for i in range(self.num_envs):
+            env = self.envs[i]
+            camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env, 0, gymapi.IMAGE_DEPTH)
+            torch_camera_tensor = gymtorch.wrap_tensor(camera_tensor)
+            self._camera_tensor_list.append(torch_camera_tensor)
 
         self.distance_prev = torch.zeros((self.num_envs), dtype=torch.float, device=self.device) # Set to 0 for now, will be initialized in reset_idx
 
@@ -289,7 +301,6 @@ class PushToy(VecTask):
             "eef_pos": self._eef_state[:, :3],
             "eef_quat": self._eef_state[:, 3:7],
             "eef_vel": self._eef_state[:, 7:],
-            "eef_ft": self._fsdata[:, self.ftsensor_idx, :],
             # object
             "obj_pos": self._obj_state[:, :3],
             "obj_quat": self._obj_state[:, 3:7],
@@ -299,7 +310,6 @@ class PushToy(VecTask):
     def _refresh(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
-        self.gym.refresh_force_sensor_tensor(self.sim)
         # Refresh states
         self._update_states()
 
@@ -327,9 +337,16 @@ class PushToy(VecTask):
         eef_orient = self.states["eef_quat"][:, 2:4] # 2D rotation around z axis
         eef_vel = self.states["eef_vel"][:, :2]
         eef_angular_vel = self.states["eef_vel"][:, 5].unsqueeze(-1) # 2D angular velocity around z axis
-        self.ft_history[:, -3:] = torch.cat([self.states["eef_ft"][:, :2], self.states["eef_ft"][:, 5].unsqueeze(-1)], dim=-1) 
-        self.obs_buf = torch.cat([eef_pos, eef_orient, eef_vel, eef_angular_vel, self.ft_history], dim=-1)
+        self.obs_buf = torch.cat([eef_pos, eef_orient, eef_vel, eef_angular_vel], dim=-1)
         # self.obs_buf = torch.cat([self.obs_buf, self.actions], dim = -1) # No need to include actions since we are using velocity control
+        # Add camera images
+        self.gym.render_all_camera_sensors(self.sim)
+        self.gym.start_access_image_tensors(self.sim)
+        image_tensor = torch.stack(self._camera_tensor_list, dim=0) # (num_envs, 128, 128)
+        # save figure
+        self.gym.end_access_image_tensors(self.sim)
+        image_tensor = image_tensor.view(self.num_envs, -1)
+        self.obs_buf = torch.cat([self.obs_buf, image_tensor], dim=-1)
         return self.obs_buf
 
     def reset_idx(self, env_ids):
@@ -389,8 +406,6 @@ class PushToy(VecTask):
                 self.gym.set_actor_root_state_tensor_indexed(
                     self.sim, gymtorch.unwrap_tensor(self._root_state),
                 gymtorch.unwrap_tensor(update_ids), len(update_ids))
-            # Initialize force torque history
-            self.ft_history = torch.zeros((self.num_envs, 3 * self.n_control_loop), device=self.device)
             for i in range(self.n_control_loop):
                 if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
                     # step physics and render each frame
@@ -399,8 +414,6 @@ class PushToy(VecTask):
                             self.render()
                         self.gym.simulate(self.sim)
                         self._refresh()
-                        # Update 2D force torque history F_x, F_y, T_z
-                        self.ft_history[:, i*3:(i+1)*3] = torch.cat([self.states["eef_ft"][:, :2], self.states["eef_ft"][:, 5].unsqueeze(-1)], dim=-1) 
                        
         else:
             raise ValueError("Invalid control type specified. Only 'velocity' is supported.")
