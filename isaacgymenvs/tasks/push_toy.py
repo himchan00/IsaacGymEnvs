@@ -377,7 +377,7 @@ class PushToy(VecTask):
         self._obj_state[env_ids, 7:] = torch.zeros((len(env_ids), 6), device=self.device)
 
         # Update eef and obj states
-        update_ids = self._global_indices[env_ids, 1:3].flatten()
+        update_ids = self._global_indices[env_ids, 1:3].clone().flatten()
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim, gymtorch.unwrap_tensor(self._root_state),
             gymtorch.unwrap_tensor(update_ids), len(update_ids))
@@ -400,8 +400,8 @@ class PushToy(VecTask):
             v_r = torch.zeros((self.num_envs, 6), device=self.device)
             v_r[:, :2] = v_xy_r
             v_r[:, 5] = v_theta_r
-            self._eef_state[:, 7:] = v_r
-            update_ids = self._global_indices[not_initial, 1].flatten()
+            self._eef_state[:, 7:] = v_r * not_initial.unsqueeze(-1).float()
+            update_ids = self._global_indices[:, 1].clone().flatten()
             if len(update_ids) > 0:
                 self.gym.set_actor_root_state_tensor_indexed(
                     self.sim, gymtorch.unwrap_tensor(self._root_state),
