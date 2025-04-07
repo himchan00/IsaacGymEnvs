@@ -82,17 +82,14 @@ class PushToy(VecTask):
         self.init_obj_radius = self.cfg["env"]["initobjradius"]
 
         # Controller type
-        self.control_type = self.cfg["env"]["controlType"] # admittance, velocity
+        self.control_type = self.cfg["env"]["controlType"] # velocity
         self.n_control_loop = self.cfg["env"]["nControlLoop"]
 
-        # actions include: delta EEF (3) + control params (2) for admittance control, delta EEF (3) for velocity control
-        if self.control_type == "admittance":
-            self.cfg["env"]["numActions"] = 5
-            self.integration_var = self.cfg["env"]["integrationVar"]
-        elif self.control_type == "velocity":
+        # delta EEF (3) for velocity control
+        if self.control_type == "velocity":
             self.cfg["env"]["numActions"] = 3
         else:
-            raise ValueError("Invalid control type specified. Must be one of: {admittance, velocity}")
+            raise ValueError("Invalid control type specified. Only 'velocity' is supported.")
         
         # Full obs: eef_pose (4) + eef_vel (3) + eef_ft (3 * n_control_loop) 
         self.cfg["env"]["numObservations"] = 7 + 3 * self.n_control_loop
@@ -102,9 +99,6 @@ class PushToy(VecTask):
         self.states = {}                        # will be dict filled with relevant states to use for reward calculation
         self.handles = {}                       # will be dict mapping names to relevant sim handles
         self.actions = None                     # Current actions to be deployed
-        self._error = None                      # x_d(t) - x_r(t) for admittance control
-        self._error_dot = None                  # x_d'(t) - x_r'(t)(=0) for admittance control
-        self.x_r_pos_prev = None                # x, y component of x_r(t-1) is required when integrationVar is x_d
         self.distance_prev = None               # 2D distance between object and target at t-1. Required for reward calculation
 
         # Tensor placeholders
@@ -118,8 +112,6 @@ class PushToy(VecTask):
         self.up_axis_idx = 2
         self.mass_min, self.mass_max = self.cfg["env"]["minmass"], self.cfg["env"]["maxmass"]
         self.friction_min, self.friction_max = self.cfg["env"]["minfriction"], self.cfg["env"]["maxfriction"]
-        self.inertia_min, self.inertia_max = self.cfg["env"]["mininertia"], self.cfg["env"]["maxinertia"]
-        self.stiffness_min, self.stiffness_max = self.cfg["env"]["minstiffness"], self.cfg["env"]["maxstiffness"]
 
         super().__init__(config=self.cfg, rl_device=rl_device, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless, virtual_screen_capture=virtual_screen_capture, force_render=force_render)
 
@@ -286,11 +278,6 @@ class PushToy(VecTask):
         self._eef_state = self._root_state[:, eef_actor_handle, :]
         self._obj_state = self._root_state[:, obj_actor_handle, :]
 
-        # Initialize actions
-        self._error = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
-        self._error_dot = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
-        self.x_r_pos_prev = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
-
         self.distance_prev = torch.zeros((self.num_envs), dtype=torch.float, device=self.device) # Set to 0 for now, will be initialized in reset_idx
 
         # Initialize indices
@@ -346,10 +333,6 @@ class PushToy(VecTask):
         return self.obs_buf
 
     def reset_idx(self, env_ids):
-
-        self._error[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
-        self._error_dot[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
-        self.x_r_pos_prev[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
 
         # Reset the EEF state
         self._eef_state[env_ids, :3] = torch.tensor(self._eef_init_pos, device=self.device)
@@ -419,11 +402,8 @@ class PushToy(VecTask):
                         # Update 2D force torque history F_x, F_y, T_z
                         self.ft_history[:, i*3:(i+1)*3] = torch.cat([self.states["eef_ft"][:, :2], self.states["eef_ft"][:, 5].unsqueeze(-1)], dim=-1) 
                        
-        elif self.control_type == "admittance":
-            """
-            TODO: Implement admittance control
-            """
-            pass
+        else:
+            raise ValueError("Invalid control type specified. Only 'velocity' is supported.")
 
 
     def post_physics_step(self):

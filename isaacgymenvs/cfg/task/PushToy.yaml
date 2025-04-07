@@ -7,13 +7,9 @@ physics_engine: ${..physics_engine}
 env:
   numEnvs: 4096
   envSpacing: 2.4
-  episodeLength: 32
+  episodeLength: 128
   enableDebugVis: False
 
-  mininertia: 1.0
-  maxinertia: 10.0
-  minstiffness: 100.0
-  maxstiffness: 1000.0
   minmass: 0.2
   maxmass: 1.2
   minfriction: 0.1
@@ -21,10 +17,8 @@ env:
 
   initobjradius: [0.2, 0.4]
 
-  controlType: 'velocity' # 'velocity' or 'admittance'
-  # Number of compliance control steps per policy step (only used for admittance control)
+  controlType: 'velocity' 
   nControlLoop: 5 # Note: Effective dt for the simulation becomes nControlLoop * dt
-  integrationVar: "x_d" # 'error' or 'x_d'. If 'error', error = x_d - x_r is continous, else x_d is continous
 
   # set to True if you use camera sensors in the environment
   enableCameraSensors: False
