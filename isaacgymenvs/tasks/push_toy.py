@@ -378,11 +378,14 @@ class PushToy(VecTask):
         # 3. Set velocity
         self._obj_state[env_ids, 7:] = torch.zeros((len(env_ids), 6), device=self.device)
 
+        """
+        Calling set_actor_root_state_tensor_indexed() twice does not work. Therefore, we update the eef and obj states in pre_physics_step() instead.
+        """
         # Update eef and obj states
-        update_ids = self._global_indices[env_ids, 1:3].clone().flatten()
-        self.gym.set_actor_root_state_tensor_indexed(
-            self.sim, gymtorch.unwrap_tensor(self._root_state),
-            gymtorch.unwrap_tensor(update_ids), len(update_ids))
+        # update_ids = self._global_indices[env_ids, 1:3].clone().flatten()
+        # self.gym.set_actor_root_state_tensor_indexed(
+        #     self.sim, gymtorch.unwrap_tensor(self._root_state),
+        #     gymtorch.unwrap_tensor(update_ids), len(update_ids))
 
         # Initialize distance_prev
         self.distance_prev[env_ids] = torch.norm(self._obj_state[env_ids, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
@@ -394,6 +397,7 @@ class PushToy(VecTask):
 
     def pre_physics_step(self, actions):
         # Control arm (scale value first)
+        initial = (self.progress_buf == 0)
         not_initial = (self.progress_buf != 0) # At t=0, the states are invalid, so we skip the control step.
         self.actions = actions.clone().to(self.device)
         v_xy_r = self.actions[:, :2].clone() * 0.1 # Scale the action with a factor of 0.1
@@ -403,7 +407,9 @@ class PushToy(VecTask):
             v_r[:, :2] = v_xy_r
             v_r[:, 5] = v_theta_r
             self._eef_state[:, 7:] = v_r
-            update_ids = self._global_indices[not_initial, 1].clone().flatten()
+            v_update_ids = self._global_indices[not_initial, 1].clone().flatten()
+            x_update_ids = self._global_indices[initial, 1:3].clone().flatten()
+            update_ids = torch.cat([v_update_ids, x_update_ids], dim=0)
             if len(update_ids) > 0:
                 self.gym.set_actor_root_state_tensor_indexed(
                     self.sim, gymtorch.unwrap_tensor(self._root_state),
@@ -424,10 +430,11 @@ class PushToy(VecTask):
     def post_physics_step(self):
         self.progress_buf += 1
 
+        self.compute_observations()
+
         env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(env_ids) > 0:
             self.reset_idx(env_ids)
 
-        self.compute_observations()
         self.compute_reward(self.actions)
 
