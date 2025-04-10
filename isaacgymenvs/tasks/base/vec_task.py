@@ -390,20 +390,17 @@ class VecTask(Env):
         if self.device == 'cpu':
             self.gym.fetch_results(self.sim, True)
 
+        self.extras["initials"] = (self.progress_buf == 0).to(self.rl_device)
         # compute observations, rewards, resets, ...
         self.post_physics_step()
 
         self.control_steps += 1
-
-        # fill time out buffer: set to 1 if we reached the max episode length AND the reset buffer is 1. Timeout == 1 makes sense only if the reset buffer is 1.
-        self.timeout_buf = (self.progress_buf >= self.max_episode_length - 1) & (self.reset_buf != 0)
 
         # randomize observations
         if self.dr_randomizations.get('observations', None):
             self.obs_buf = self.dr_randomizations['observations']['noise_lambda'](self.obs_buf)
 
         self.extras["time_outs"] = self.timeout_buf.to(self.rl_device)
-        self.extras["initials"] = (self.progress_buf == 0).to(self.rl_device)
 
         self.obs_dict["obs"] = torch.clamp(self.obs_buf, -self.clip_obs, self.clip_obs).to(self.rl_device)
         self.obs_dict["images"] = self.image_buf.to(self.rl_device)

@@ -19,8 +19,8 @@ env:
 
   controlType: 'velocity' 
   controlFrequencyInv: 12 # 5 Hz
-  camWidth: 128
-  camHeight: 128
+  camWidth: 64
+  camHeight: 64
 
   # set to True if you use camera sensors in the environment
   enableCameraSensors: True

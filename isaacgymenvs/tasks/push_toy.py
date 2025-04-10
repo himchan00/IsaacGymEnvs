@@ -321,10 +321,9 @@ class PushToy(VecTask):
 
     def compute_reward(self, actions):
         # Compute current 2D distance between object and target
-        not_initial = (self.progress_buf != 0) # At t=0, the states are invalid, so we set the reward to 0.
         distance = torch.norm(self.states["obj_pos"][:, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
         delta_distance = distance - self.distance_prev
-        self.distance_prev = distance * not_initial.float() + self.distance_prev * (1 - not_initial.float())
+        self.distance_prev = distance 
         reward = -delta_distance * 10
         # Success when the object is close to the target & velocity is zero
         is_success = (distance < 0.1) & (torch.norm(self.states["obj_vel"][:, :2], dim=-1) < 1e-3)
@@ -334,9 +333,9 @@ class PushToy(VecTask):
         eef_distance = torch.norm(eef_pos, dim=-1)
         is_fail = (eef_distance > 1.0)
         reward += torch.where(is_fail, torch.tensor(-1.0, device=self.device), torch.tensor(0., device=self.device))
-        self.rew_buf[:] = reward * not_initial.float()
-        is_terminal = (is_success | is_fail) & not_initial # The agent may terminate due to invalid states at t=0
-        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
+        self.rew_buf[:] = reward 
+        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length) | is_success | is_fail, torch.ones_like(self.reset_buf), self.reset_buf)
+        self.timeout_buf[:] = torch.where(self.progress_buf >= self.max_episode_length, torch.ones_like(self.timeout_buf), self.timeout_buf)
 
 
     def compute_observations(self):
@@ -409,8 +408,8 @@ class PushToy(VecTask):
         initial = (self.progress_buf == 0)
         not_initial = (self.progress_buf != 0) # At t=0, the states are invalid, so we skip the control step.
         self.actions = actions.clone().to(self.device)
-        v_xy_r = self.actions[:, :2].clone() * 0.1 # Scale the action with a factor of 0.1
-        v_theta_r = self.actions[:, 2].clone() * 0.5 # Scale the action with a factor of 0.5
+        v_xy_r = self.actions[:, :2].clone() * 0.3 # Scale the action with a factor of 0.3
+        v_theta_r = self.actions[:, 2].clone()  # Scale the action with a factor of 1.0
         if self.control_type == "velocity":
             v_r = torch.zeros((self.num_envs, 6), device=self.device)
             v_r[:, :2] = v_xy_r
@@ -433,10 +432,10 @@ class PushToy(VecTask):
         self.progress_buf += 1
 
         self.compute_observations()
+        self.compute_reward(self.actions)
 
         env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(env_ids) > 0:
             self.reset_idx(env_ids)
 
-        self.compute_reward(self.actions)
 
