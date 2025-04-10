@@ -18,7 +18,7 @@ env:
   initobjradius: [0.2, 0.4]
 
   controlType: 'velocity' 
-  nControlLoop: 5 # Note: Effective dt for the simulation becomes nControlLoop * dt
+  controlFrequencyInv: 12 # 5 Hz
   camWidth: 128
   camHeight: 128
 
@@ -26,7 +26,7 @@ env:
   enableCameraSensors: True
 
 sim:
-  dt: 0.1 # 0.5/nControlLoop
+  dt: 0.016667
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}

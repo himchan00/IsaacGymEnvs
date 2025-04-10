@@ -83,7 +83,6 @@ class PushToy(VecTask):
 
         # Controller type
         self.control_type = self.cfg["env"]["controlType"] # velocity
-        self.n_control_loop = self.cfg["env"]["nControlLoop"]
         self.cam_width = self.cfg["env"]["camWidth"]
         self.cam_height = self.cfg["env"]["camHeight"]
 
@@ -93,8 +92,8 @@ class PushToy(VecTask):
         else:
             raise ValueError("Invalid control type specified. Only 'velocity' is supported.")
         
-        # Full obs: eef_pose (4) + eef_vel (3) + depth image (height*width)
-        self.cfg["env"]["numObservations"] = 7 + self.cam_width * self.cam_height
+        # Full obs: eef_pose (4) + eef_vel (3)
+        self.cfg["env"]["numObservations"] = 7 
 
         # Values to be filled in at runtime
         self.states = {}                        # will be dict filled with relevant states to use for reward calculation
@@ -115,11 +114,11 @@ class PushToy(VecTask):
 
         super().__init__(config=self.cfg, rl_device=rl_device, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless, virtual_screen_capture=virtual_screen_capture, force_render=force_render)
 
-        # Reset all environments
-        self.reset_idx(torch.arange(self.num_envs, device=self.device))
-
         # Refresh tensors
         self._refresh()
+
+        # Reset all environments
+        self.reset_idx(torch.arange(self.num_envs, device=self.device))
 
 
     def create_sim(self):
@@ -312,6 +311,13 @@ class PushToy(VecTask):
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         # Refresh states
         self._update_states()
+    
+    def _sample_transitions(self, image, next_image, action):
+        t = torch.clamp(self.progress_buf.clone(), 1e-6)
+        update_ids = (torch.rand(self.num_envs, device=self.device) <= (1/t)) 
+        self.sampled_action_buf[update_ids] = action[update_ids]
+        self.sampled_transition_buf[update_ids] = torch.cat([image, next_image], dim = 1)[update_ids]
+
 
     def compute_reward(self, actions):
         # Compute current 2D distance between object and target
@@ -342,14 +348,17 @@ class PushToy(VecTask):
         self.obs_buf = torch.cat([eef_pos, eef_orient, eef_vel, eef_angular_vel], dim=-1)
         # self.obs_buf = torch.cat([self.obs_buf, self.actions], dim = -1) # No need to include actions since we are using velocity control
         # Add camera images
+        if self.headless: # If headless, we need to render the images
+            self.gym.fetch_results(self.sim, True)
+            self.gym.step_graphics(self.sim)
         self.gym.render_all_camera_sensors(self.sim)
         self.gym.start_access_image_tensors(self.sim)
-        image_tensor = torch.stack(self._camera_tensor_list, dim=0) # (num_envs, 128, 128)
+        image_tensor = torch.stack(self._camera_tensor_list, dim=0).unsqueeze(1) # (num_envs, 1, cam_height, cam_width)
         # save figure
         self.gym.end_access_image_tensors(self.sim)
-        image_tensor = image_tensor.view(self.num_envs, -1)
-        self.obs_buf = torch.cat([self.obs_buf, image_tensor], dim=-1)
-        return self.obs_buf
+        self._sample_transitions(self.image_buf, image_tensor, self.actions)
+        self.image_buf = image_tensor
+        return self.obs_buf, self.image_buf
 
     def reset_idx(self, env_ids):
 
@@ -414,14 +423,7 @@ class PushToy(VecTask):
                 self.gym.set_actor_root_state_tensor_indexed(
                     self.sim, gymtorch.unwrap_tensor(self._root_state),
                 gymtorch.unwrap_tensor(update_ids), len(update_ids))
-            for i in range(self.n_control_loop):
-                if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
-                    # step physics and render each frame
-                    for i in range(self.control_freq_inv):
-                        if self.force_render:
-                            self.render()
-                        self.gym.simulate(self.sim)
-                        self._refresh()
+
                        
         else:
             raise ValueError("Invalid control type specified. Only 'velocity' is supported.")
