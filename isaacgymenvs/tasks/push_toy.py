@@ -315,9 +315,10 @@ class PushToy(VecTask):
 
     def compute_reward(self, actions):
         # Compute current 2D distance between object and target
+        not_initial = (self.progress_buf != 0) # At t=0, the states are invalid, so we set the reward to 0.
         distance = torch.norm(self.states["obj_pos"][:, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
         delta_distance = distance - self.distance_prev
-        self.distance_prev = distance
+        self.distance_prev = distance * not_initial.float() + self.distance_prev * (1 - not_initial.float())
         reward = -delta_distance * 10
         # Success when the object is close to the target & velocity is zero
         is_success = (distance < 0.1) & (torch.norm(self.states["obj_vel"][:, :2], dim=-1) < 1e-3)
@@ -327,8 +328,9 @@ class PushToy(VecTask):
         eef_distance = torch.norm(eef_pos, dim=-1)
         is_fail = (eef_distance > 1.0)
         reward += torch.where(is_fail, torch.tensor(-1.0, device=self.device), torch.tensor(0., device=self.device))
-        self.rew_buf[:] = reward
-        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_success | is_fail, torch.ones_like(self.reset_buf), self.reset_buf)
+        self.rew_buf[:] = reward * not_initial.float()
+        is_terminal = (is_success | is_fail) & not_initial # The agent may terminate due to invalid states at t=0
+        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length - 1) | is_terminal, torch.ones_like(self.reset_buf), self.reset_buf)
 
 
     def compute_observations(self):
@@ -371,8 +373,8 @@ class PushToy(VecTask):
         # 2. Set orientation
         axis_angle_o = torch.zeros((len(env_ids), 3), device=self.device)
         axis_angle_o[:, 2] = math.pi * (2 * torch.rand((len(env_ids),), device=self.device) - 1) # rotate around z axis by -pi to pi
-        quat_0 = axisangle2quat(axis_angle_o)
-        self._obj_state[env_ids, 3:7] = quat_0
+        quat_o = axisangle2quat(axis_angle_o)
+        self._obj_state[env_ids, 3:7] = quat_o
         # 3. Set velocity
         self._obj_state[env_ids, 7:] = torch.zeros((len(env_ids), 6), device=self.device)
 
@@ -400,8 +402,8 @@ class PushToy(VecTask):
             v_r = torch.zeros((self.num_envs, 6), device=self.device)
             v_r[:, :2] = v_xy_r
             v_r[:, 5] = v_theta_r
-            self._eef_state[:, 7:] = v_r * not_initial.unsqueeze(-1).float()
-            update_ids = self._global_indices[:, 1].clone().flatten()
+            self._eef_state[:, 7:] = v_r
+            update_ids = self._global_indices[not_initial, 1].clone().flatten()
             if len(update_ids) > 0:
                 self.gym.set_actor_root_state_tensor_indexed(
                     self.sim, gymtorch.unwrap_tensor(self._root_state),
