@@ -69,15 +69,12 @@ class ActorCritic(torch.nn.Module):
         """
         cond = torch.cat([obs, context], dim = -1) # (batch_size, obs_dim + 2 * context_dim)
         out = self.network(image, cond)
-        action_mean = out[:, :self.action_dim]
+        action_mean = torch.tanh(out[:, :self.action_dim])
         logstd = out[:, self.action_dim:2*self.action_dim]
         logstd = torch.clamp(logstd, self.logstd_clip[0], self.logstd_clip[1])
         value = out[:, -1] # (batch_size, )
         action_std = torch.exp(logstd)
-        dist = transformed_distribution.TransformedDistribution(
-            Normal(action_mean, action_std),
-            [transforms.TanhTransform(cache_size=1)]
-        )
+        dist = Normal(action_mean, action_std)
         action = dist.sample() # (batch_size, action_dim)
 
         return action.detach(), value.detach()
@@ -96,19 +93,16 @@ class ActorCritic(torch.nn.Module):
         """
         cond = torch.cat([obs, context], dim = -1) # (batch_size, obs_dim + 2 * context_dim)
         out = self.network(image, cond)
-        action_mean = out[:, :self.action_dim]
+        action_mean = torch.tanh(out[:, :self.action_dim])
         logstd = out[:, self.action_dim:2*self.action_dim]
         logstd = torch.clamp(logstd, self.logstd_clip[0], self.logstd_clip[1])
         value = out[:, -1] # (batch_size, )
         action_std = torch.exp(logstd)
-        dist = transformed_distribution.TransformedDistribution(
-            Normal(action_mean, action_std),
-            [transforms.TanhTransform(cache_size=1)]
-        )
+        dist = Normal(action_mean, action_std)
         action_logprob = dist.log_prob(action).sum(dim=-1) # (batch_size, )
-        # entropy = dist.entropy().sum(dim = -1) # This is not implemented for tanh normal
-    
-        return action_logprob, value
+        entropy = dist.entropy().sum(dim = -1) # (batch_size, )
+
+        return action_logprob, value, entropy
 
 
 
@@ -245,7 +239,7 @@ class Contextual_A2C:
         contexts = torch.cat([context_mean, context_var], dim = -1)
 
         # Evaluating old actions and values
-        logprobs, values = self.actor_critic.evaluate(old_observations, old_images, contexts, old_actions)
+        logprobs, values, entropy = self.actor_critic.evaluate(old_observations, old_images, contexts, old_actions)
 
         # Policy gradient loss
         actor_loss = -(advantages * logprobs).mean()
@@ -254,7 +248,7 @@ class Contextual_A2C:
         critic_loss = (returns - values).pow(2).mean()
 
         # Entropy loss (Not sure this is correct)
-        entropy_loss = logprobs.mean() # (batch_size, ) 
+        entropy_loss = -entropy.mean() # (batch_size, ) 
 
         # Total loss
         loss = actor_loss + self.critic_coef * critic_loss + self.entropy_coef * entropy_loss

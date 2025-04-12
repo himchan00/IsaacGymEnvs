@@ -353,6 +353,7 @@ class PushToy(VecTask):
         self.gym.render_all_camera_sensors(self.sim)
         self.gym.start_access_image_tensors(self.sim)
         image_tensor = torch.stack(self._camera_tensor_list, dim=0).unsqueeze(1) # (num_envs, 1, cam_height, cam_width)
+        image_tensor = torch.clip(image_tensor, min = -3.0) # prevent - inf depth values
         # save figure
         self.gym.end_access_image_tensors(self.sim)
         self._sample_transitions(self.image_buf, image_tensor, self.actions)

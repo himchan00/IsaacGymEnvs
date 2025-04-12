@@ -9,6 +9,7 @@ env:
   envSpacing: 2.4
   episodeLength: 128
   enableDebugVis: False
+  clipActions: 1.0
 
   minmass: 0.2
   maxmass: 1.2
