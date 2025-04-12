@@ -2,16 +2,23 @@
 ################# training procedure ################
 import isaacgym
 import isaacgymenvs
-from project.policy.actor import Contextual_PPO
+from project.policy.actor import Contextual_A2C
+import torch
+import numpy as np
+import random
 
 obs_dim = 7
 action_dim = 3
 context_dim = 64
 
 device = 'cuda:0'
+torch.random.manual_seed(0)
+np.random.seed(0)
+random.seed(0)
+
 # Initialize environment
 num_envs = 256
-n_steps = 64
+n_steps = 4
 envs = isaacgymenvs.make(
     seed=0,
     task="PushToy",
@@ -26,7 +33,7 @@ print("Observation space is", envs.observation_space)
 print("Action space is", envs.action_space)
 
 # initialize a PPO agent
-ppo_agent = Contextual_PPO(obs_dim=obs_dim, action_dim = action_dim, context_dim = context_dim, batch_size=128, device = device, K_epochs=1)
+ppo_agent = Contextual_A2C(obs_dim=obs_dim, action_dim = action_dim, context_dim = context_dim,  device = device)
 
 max_training_timesteps = 1e6
 # printing and logging variables
@@ -59,7 +66,7 @@ while time_step <= max_training_timesteps:
 
     # update PPO agent
     if time_step % n_steps == 0:
-        print("Training PPO agent")
+        print("Training A2C agent")
         d_train = ppo_agent.update()
         for key, value in d_train.items():
             print(f"{key}: {value}")

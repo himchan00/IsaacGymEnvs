@@ -372,9 +372,6 @@ class VecTask(Env):
             Observations are dict of observations (currently only one member called 'obs')
         """
 
-        # randomize actions
-        if self.dr_randomizations.get('actions', None):
-            actions = self.dr_randomizations['actions']['noise_lambda'](actions)
 
         action_tensor = torch.clamp(actions, -self.clip_actions, self.clip_actions)
         # apply actions
@@ -396,9 +393,6 @@ class VecTask(Env):
 
         self.control_steps += 1
 
-        # randomize observations
-        if self.dr_randomizations.get('observations', None):
-            self.obs_buf = self.dr_randomizations['observations']['noise_lambda'](self.obs_buf)
 
         self.extras["time_outs"] = self.timeout_buf.to(self.rl_device)
 
@@ -406,11 +400,10 @@ class VecTask(Env):
         self.obs_dict["images"] = self.image_buf.to(self.rl_device)
         self.obs_dict["sampled_actions"] = self.sampled_action_buf.to(self.rl_device)
         self.obs_dict["sampled_transitions"] = self.sampled_transition_buf.to(self.rl_device)
-        # asymmetric actor-critic
-        if self.num_states > 0:
-            self.obs_dict["states"] = self.get_state()
+        # progress_buf=0 indicates that the environment has been reset
+        dones = (self.progress_buf == 0).to(self.rl_device)
 
-        return self.obs_dict, self.rew_buf.to(self.rl_device), self.reset_buf.to(self.rl_device), self.extras
+        return self.obs_dict, self.rew_buf.to(self.rl_device), dones, self.extras
 
     def zero_actions(self) -> torch.Tensor:
         """Returns a buffer with zero actions.

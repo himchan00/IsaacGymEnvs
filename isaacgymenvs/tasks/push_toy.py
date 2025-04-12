@@ -334,8 +334,8 @@ class PushToy(VecTask):
         is_fail = (eef_distance > 1.0)
         reward += torch.where(is_fail, torch.tensor(-1.0, device=self.device), torch.tensor(0., device=self.device))
         self.rew_buf[:] = reward 
-        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length) | is_success | is_fail, torch.ones_like(self.reset_buf), self.reset_buf)
-        self.timeout_buf[:] = torch.where(self.progress_buf >= self.max_episode_length, torch.ones_like(self.timeout_buf), self.timeout_buf)
+        self.reset_buf[:] = torch.where((self.progress_buf >= self.max_episode_length) | is_success | is_fail, torch.ones_like(self.reset_buf), torch.zeros_like(self.reset_buf))
+        self.timeout_buf[:] = torch.where(self.progress_buf >= self.max_episode_length, torch.ones_like(self.timeout_buf), torch.zeros_like(self.timeout_buf))
 
 
     def compute_observations(self):

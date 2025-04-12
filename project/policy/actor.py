@@ -14,7 +14,6 @@ class RolloutBuffer:
         self.images = []
         self.observations = []
         self.contexts = []
-        self.logprobs = []
         self.rewards = []
         self.values = []
         self.sampled_actions = []
@@ -28,7 +27,6 @@ class RolloutBuffer:
         del self.observations[:]
         del self.images[:]
         del self.contexts[:]
-        del self.logprobs[:]
         del self.rewards[:]
         del self.values[:]
         del self.sampled_actions[:]
@@ -53,7 +51,7 @@ class ActorCritic(torch.nn.Module):
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.context_dim = context_dim
-        self.logstd_clip = [-10, 2]
+        self.logstd_clip = [-20, 2]
 
     def forward(self):
         raise NotImplementedError
@@ -81,9 +79,8 @@ class ActorCritic(torch.nn.Module):
             [transforms.TanhTransform(cache_size=1)]
         )
         action = dist.sample() # (batch_size, action_dim)
-        action_logprob = dist.log_prob(action).sum(dim=-1) # (batch_size, )
 
-        return action.detach(), action_logprob.detach(), value.detach()
+        return action.detach(), value.detach()
 
     def evaluate(self, obs, image, context, action):
         """
@@ -114,25 +111,20 @@ class ActorCritic(torch.nn.Module):
         return action_logprob, value
 
 
-class Contextual_PPO:
+
+class Contextual_A2C:
             
-    def __init__(self, obs_dim, action_dim, context_dim, batch_size, device, lr = 1e-4, lr_e = 3e-5, gamma = 0.99, K_epochs = 10, eps_clip = 0.2 , critic_coef = 0.5, entropy_coef = 0.0, clip_grad = 0.5):
+    def __init__(self, obs_dim, action_dim, context_dim, device, lr = 1e-4, lr_e = 3e-5, gamma = 0.99, critic_coef = 0.5, entropy_coef = 0.0, clip_grad = 0.5, normalize_advantage = True):
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.context_dim = context_dim
-        self.batch_size = batch_size
         self.gamma = gamma
-        self.K_epochs = K_epochs
-        self.eps_clip = eps_clip
         self.critic_coef = critic_coef
         self.entropy_coef = entropy_coef
 
         self.buffer = RolloutBuffer()
 
         self.actor_critic = ActorCritic(obs_dim, action_dim, context_dim).to(device)
-        self.actor_critic_old = ActorCritic(obs_dim, action_dim, context_dim).to(device)
-        self.actor_critic_old.load_state_dict(self.actor_critic.state_dict())
-        self.actor_critic_old.eval()
 
         self.encoder = Wide_ResNet_Cond(
                         depth = 10, 
@@ -145,8 +137,10 @@ class Contextual_PPO:
                         dropout_rate = 0.0
                         ).to(device)
 
-        self.optimizer = torch.optim.Adam(self.actor_critic.parameters(), lr=lr)
-        self.optimizer_e = torch.optim.Adam(self.encoder.parameters(), lr=lr_e)
+        self.optimizer = torch.optim.Adam([{'params': self.actor_critic.parameters(), 'lr': lr}, 
+                                            {'params': self.encoder.parameters(), 'lr': lr_e}])
+                                          
+        self.normalize_advantage = normalize_advantage
 
         self.device = device
         self.clip_grad = clip_grad
@@ -163,13 +157,13 @@ class Contextual_PPO:
         Image: (batch_size, 1, height, width)
         Context: (batch_size, 2 * context_dim)
         """
+        self.actor_critic.eval()
         with torch.no_grad():
-            action, action_logprob, value = self.actor_critic_old.act(obs, image, context)
+            action, value = self.actor_critic.act(obs, image, context)
             self.buffer.observations.append(obs)
             self.buffer.images.append(image)
             self.buffer.contexts.append(context)
             self.buffer.actions.append(action)
-            self.buffer.logprobs.append(action_logprob)
             self.buffer.values.append(value)
         
         return action
@@ -186,7 +180,6 @@ class Contextual_PPO:
             out = self.encoder(torch.cat([image, next_image], dim = 1), action)
             new_context_mean = out[:, :self.context_dim]
             log_var = out[:, self.context_dim:]
-            log_var = torch.clamp(log_var, -10, 2)
             new_contex_var = torch.exp(log_var)
             new_contex_prec = 1 / new_contex_var
 
@@ -220,12 +213,10 @@ class Contextual_PPO:
         return_std = returns.std().item()
 
         # Convert to tensor
-
         old_observations = torch.cat(self.buffer.observations, dim = 0)[not_initials].detach().to(self.device) # (n_envs * n_steps, obs_dim)
         old_images = torch.cat(self.buffer.images, dim = 0)[not_initials].detach().to(self.device) # (n_envs * n_steps, 1, height, width)
         old_contexts = torch.cat(self.buffer.contexts, dim = 0)[not_initials].detach().to(self.device) # (n_envs * n_steps, 2 * context_dim)
         old_actions = torch.cat(self.buffer.actions, dim = 0)[not_initials].detach().to(self.device) # (n_envs * n_steps, action_dim)
-        old_logprobs = torch.cat(self.buffer.logprobs, dim = 0)[not_initials].detach().to(self.device) # (n_envs * n_steps,)
         old_values = torch.cat(self.buffer.values, dim = 0)[not_initials].detach().to(self.device) # (n_envs * n_steps,)
         # For encoder training
         old_sampled_actions = torch.cat(self.buffer.sampled_actions, dim = 0)[not_initials].detach().to(self.device) # (n_envs * n_steps, action_dim)
@@ -235,93 +226,53 @@ class Contextual_PPO:
         # Calculate advantages
         advantages = returns - old_values
         # Normalize advantages
+        if self.normalize_advantage and len(advantages) > 1:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        n_updates = int(len(old_observations) // self.batch_size)
-        # Optimize policy for K epochs
+        # Optimize policy
         self.encoder.train()
         self.actor_critic.train()
-        actor_loss_sum = 0
-        critic_loss_sum = 0
-        entropy_loss_sum = 0
-        cnt = 0
-        accumumated_grads = [torch.zeros_like(p) for p in self.encoder.parameters()]
-        self.optimizer_e.zero_grad()
-        for _ in range(self.K_epochs):
-            # Randomize the order of the data
-            indices = torch.randperm(len(old_observations))
-            for i in range(n_updates):
-                self.optimizer.zero_grad()
-                # Sample a batch of data
-                batch_indices = indices[i * self.batch_size:(i + 1) * self.batch_size]
-                sampled_observations = old_observations[batch_indices]
-                sampled_images = old_images[batch_indices]
-                sampled_contexts = old_contexts[batch_indices]
-                sampled_actions = old_actions[batch_indices]
-                sampled_logprobs = old_logprobs[batch_indices]
-                sampled_advantages = advantages[batch_indices]
-                sampled_returns = returns[batch_indices]
-                sampled_sampled_actions = old_sampled_actions[batch_indices]
-                sampled_sampled_transitions = old_sampled_transitions[batch_indices]
+        self.optimizer.zero_grad()
 
-                out = self.encoder(sampled_sampled_transitions, sampled_sampled_actions)
-                new_context_mean = out[:, :self.context_dim]
-                new_context_prec = 1 / torch.exp(torch.clamp(out[:, self.context_dim:], -10, 2))
-                prev_context_prec = (1 / sampled_contexts[:, self.context_dim:] - new_context_prec).detach()
-                # context_mean_rest * context_prec_rest + context_mean * context_prec = sampled_contexts[:, :self.context_dim] * sampled_contexts[:, self.context_dim:]
-                prev_context_mean = (sampled_contexts[:, :self.context_dim] /sampled_contexts[:, self.context_dim:] - new_context_mean * new_context_prec).detach() / prev_context_prec
-                context_var = 1/(prev_context_prec + new_context_prec)
-                context_mean = (prev_context_mean * prev_context_prec + new_context_mean * new_context_prec) * context_var
-                contexts = torch.cat([context_mean, context_var], dim = -1)
+        out = self.encoder(old_sampled_transitions, old_sampled_actions)
+        new_context_mean = out[:, :self.context_dim]
+        new_context_prec = 1 / torch.exp(out[:, self.context_dim:])
+        prev_context_prec = (1 / old_contexts[:, self.context_dim:] - new_context_prec).detach()
+        # context_mean_rest * context_prec_rest + context_mean * context_prec = sampled_contexts[:, :self.context_dim] * sampled_contexts[:, self.context_dim:]
+        prev_context_mean = (old_contexts[:, :self.context_dim] /old_contexts[:, self.context_dim:] - new_context_mean * new_context_prec).detach() / prev_context_prec
+        context_var = 1/(prev_context_prec + new_context_prec)
+        context_mean = (prev_context_mean * prev_context_prec + new_context_mean * new_context_prec) * context_var
+        contexts = torch.cat([context_mean, context_var], dim = -1)
 
-                # Evaluating old actions and values
-                logprobs, values = self.actor_critic.evaluate(sampled_observations, sampled_images, contexts, sampled_actions)
+        # Evaluating old actions and values
+        logprobs, values = self.actor_critic.evaluate(old_observations, old_images, contexts, old_actions)
 
-                # Finding the ratio (pi_theta / pi_theta_old)
-                ratios = torch.exp(logprobs - sampled_logprobs.detach())
+        # Policy gradient loss
+        actor_loss = -(advantages * logprobs).mean()
 
-                # Finding Surrogate Loss
-                surr1 = ratios * sampled_advantages
-                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * sampled_advantages
+        # Critic loss
+        critic_loss = (returns - values).pow(2).mean()
 
-                actor_loss = -torch.min(surr1, surr2).mean()
-                # Critic loss
-                critic_loss = (sampled_returns - values).pow(2).mean()
+        # Entropy loss (Not sure this is correct)
+        entropy_loss = logprobs.mean() # (batch_size, ) 
 
-                # Entropy loss (Not sure this is correct)
-                entropy_loss = logprobs.mean() # (batch_size, ) 
+        # Total loss
+        loss = actor_loss + self.critic_coef * critic_loss + self.entropy_coef * entropy_loss
 
-                # Total loss
-                loss = actor_loss + self.critic_coef * critic_loss + self.entropy_coef * entropy_loss
-
-                # Take gradient step
-
-                loss.backward()
-                if self.clip_grad is not None:
-                    torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.clip_grad)
-                    torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.clip_grad)
-                for acc, p in zip(accumumated_grads, self.encoder.parameters()):
-                    acc += p.grad.data
-                self.optimizer_e.zero_grad()
-                self.optimizer.step()
-                actor_loss_sum += actor_loss.item()
-                critic_loss_sum += critic_loss.item()
-                entropy_loss_sum += entropy_loss.item()
-                cnt += 1
-        
-        for acc, p in zip(accumumated_grads, self.encoder.parameters()):
-            p.grad = acc.clone()
-        self.optimizer_e.step()
-
-        # Copy new weights into old policy
-        self.actor_critic_old.load_state_dict(self.actor_critic.state_dict())
+        # Take gradient step
+        loss.backward()
+        if self.clip_grad is not None:
+            torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.clip_grad)
+            torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.clip_grad)
+        self.optimizer.step()
 
         # clear buffer
         self.buffer.clear()
 
         # Calculate mean loss
-        actor_loss_mean = actor_loss_sum / cnt
-        critic_loss_mean = critic_loss_sum / cnt
-        entropy_loss_mean = entropy_loss_sum / cnt
+        actor_loss_mean = actor_loss.item()
+        critic_loss_mean = critic_loss.item()
+        entropy_loss_mean = entropy_loss.item()
         d_train = {
             "return": return_mean,
             "return_std": return_std,
@@ -330,4 +281,3 @@ class Contextual_PPO:
             "entropy_loss": entropy_loss_mean
         }
         return d_train
-
