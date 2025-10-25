@@ -7,16 +7,10 @@ physics_engine: ${..physics_engine}
 env:
   numEnvs: 16384
   envSpacing: 2.4
-  episodeLength: 100
-  obsForce: True
-  obsVel: False
+  episodeLength: 256
   enableDebugVis: False
   clipActions: 1.0
 
-  mininertia: 1.0
-  maxinertia: 10.0
-  minstiffness: 100.0
-  maxstiffness: 1000.0
   minmass: 0.2
   maxmass: 1.2
   minfriction: 0.1
@@ -26,11 +20,6 @@ env:
   initboxPosNoise: 0.1
   boxPosErrorStd: 0.0
 
-  controlType: 'position' # 'osc' or 'admittance' or 'position'
-  # Number of compliance control steps per policy step (only used for admittance control)
-  nControlLoop: 10 # Note: Effective dt for the simulation becomes nControlLoop * dt
-  integrationVar: "x_d" # 'error' or 'x_d'. If 'error', error = x_d - x_r is continous, else x_d is continous
-
   asset:
     assetRoot: "../../assets"
     assetFileNameFranka: "urdf/franka_description/robots/franka_panda_finger.urdf"
@@ -39,7 +28,7 @@ env:
   enableCameraSensors: False
 
 sim:
-  dt: 0.005 # 1/20 for 'osc', 1/20/nControlLoop for 'admittance' and 'position'
+  dt: 0.01667 # 1/60
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}

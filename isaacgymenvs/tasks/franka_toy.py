@@ -81,44 +81,20 @@ class FrankaToy(VecTask):
         self.cfg = cfg
 
         self.max_episode_length = self.cfg["env"]["episodeLength"]
-        self.obs_force = self.cfg["env"]["obsForce"]
-        self.obs_vel = self.cfg["env"]["obsVel"]
         self.init_franka_dof_noise = self.cfg["env"]["initfrankaDofNoise"]
         self.init_box_pos_noise = self.cfg["env"]["initboxPosNoise"]
         self.box_pos_error_std = self.cfg["env"]["boxPosErrorStd"]
 
-        # Controller type
-        self.control_type = self.cfg["env"]["controlType"]
-        if self.control_type == "admittance" or self.control_type == "position":
-            self.n_control_loop = self.cfg["env"]["nControlLoop"]
-        else:
-            self.n_control_loop = 1 # This is not used
-
-        # Full obs: eef_pose (2) + eef_vel (2) + eef_force (2) + box_pose (2) + box_vel (2) + box_orientation (2) + box_angular_vel (1)
-        self.cfg["env"]["numObservations"] = 8
-        if self.obs_force:
-            self.cfg["env"]["numObservations"] += 2
-        if self.obs_vel:
-            self.cfg["env"]["numObservations"] += 3
-        # actions include: delta EEF (2) + control params (2) for admittance control, delta EEF (2) for position control and osc control
-        if self.control_type == "admittance":
-            self.cfg["env"]["numActions"] = 4
-            self.integration_var = self.cfg["env"]["integrationVar"]
-        elif self.control_type == "position":
-            self.cfg["env"]["numActions"] = 2
-        elif self.control_type == "osc":
-            self.cfg["env"]["numActions"] = 2
-        else:
-            raise ValueError("Invalid control type specified. Must be one of: {osc, admittance, position}")
+        # Full obs: eef_pose (2) + eef_vel (2) + box_pose (2) + box_vel (2) + box_orientation (2) + box_angular_vel (1)
+        self.cfg["env"]["numObservations"] = 11
+        # actions: delta EEF (2) for osc control
+        self.cfg["env"]["numActions"] = 2
 
         # Values to be filled in at runtime
         self.states = {}                        # will be dict filled with relevant states to use for reward calculation
         self.handles = {}                       # will be dict mapping names to relevant sim handles
         self.num_dofs = None                    # Total number of DOFs per env
         self.actions = None                     # Current actions to be deployed
-        self._error = None                      # x_d(t) - x_r(t) for admittance control
-        self._error_dot = None                  # x_d'(t) - x_r'(t)(=0) for admittance control
-        self.x_r_pos_prev = None                # x, y component of x_r(t-1) is required when integrationVar is x_d
         self.distance_prev = None               # 2D distance between box and target at t-1. Required for reward calculation
 
         # Tensor placeholders
@@ -127,7 +103,6 @@ class FrankaToy(VecTask):
         self._q = None                          # Joint positions           (n_envs, n_dof)
         self._qd = None                         # Joint velocities          (n_envs, n_dof)
         self._rigid_body_state = None           # State of all rigid bodies             (n_envs, n_bodies, 13)
-        self._contact_forces = None             # Contact forces in sim
         self._eef_state = None                  # end effector state
         self._j_eef = None                      # Jacobian for end effector
         self._mm = None                         # Mass matrix
@@ -139,8 +114,6 @@ class FrankaToy(VecTask):
         self.up_axis_idx = 2
         self.mass_min, self.mass_max = self.cfg["env"]["minmass"], self.cfg["env"]["maxmass"]
         self.friction_min, self.friction_max = self.cfg["env"]["minfriction"], self.cfg["env"]["maxfriction"]
-        self.inertia_min, self.inertia_max = self.cfg["env"]["mininertia"], self.cfg["env"]["maxinertia"]
-        self.stiffness_min, self.stiffness_max = self.cfg["env"]["minstiffness"], self.cfg["env"]["maxstiffness"]
 
         super().__init__(config=self.cfg, rl_device=rl_device, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless, virtual_screen_capture=virtual_screen_capture, force_render=force_render)
 
@@ -148,7 +121,7 @@ class FrankaToy(VecTask):
         self.franka_default_dof_pos = to_torch([- (1 / 4) * np.pi, (1 / 8) * np.pi, 0, - (6 / 8) * np.pi, 0, 2.9416, 0], device=self.device)
 
         # OSC Gains
-        self.kp = to_torch([100., 100., 1000, 1000, 1000, 1000], device=self.device) # More weight on z-axis and orientation
+        self.kp = to_torch([150.] * 6, device=self.device)
         self.kd = 2 * torch.sqrt(self.kp)
         self.kp_null = to_torch([10.] * 7, device=self.device)
         self.kd_null = 2 * torch.sqrt(self.kp_null)
@@ -338,12 +311,10 @@ class FrankaToy(VecTask):
         _actor_root_state_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
         _dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
         _rigid_body_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
-        _contact_forces_tensor = self.gym.acquire_net_contact_force_tensor(self.sim)
 
         self._root_state = gymtorch.wrap_tensor(_actor_root_state_tensor).view(self.num_envs, -1, 13)
         self._dof_state = gymtorch.wrap_tensor(_dof_state_tensor).view(self.num_envs, -1, 2)
         self._rigid_body_state = gymtorch.wrap_tensor(_rigid_body_state_tensor).view(self.num_envs, -1, 13)
-        self._contact_forces = gymtorch.wrap_tensor(_contact_forces_tensor).view(self.num_envs, -1, 3)
 
         self._q = self._dof_state[..., 0]
         self._qd = self._dof_state[..., 1]
@@ -361,9 +332,6 @@ class FrankaToy(VecTask):
 
         # Initialize actions
         self._effort_control = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
-        self._error = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
-        self._error_dot = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
-        self.x_r_pos_prev = torch.zeros((self.num_envs, 2), dtype=torch.float, device=self.device)
 
         self.distance_prev = torch.zeros((self.num_envs), dtype=torch.float, device=self.device) # Set to 0 for now, will be initialized in reset_idx
 
@@ -377,7 +345,6 @@ class FrankaToy(VecTask):
             "eef_pos": self._eef_state[:, :3],
             "eef_quat": self._eef_state[:, 3:7],
             "eef_vel": self._eef_state[:, 7:],
-            "eef_force": self._contact_forces[:, self.handles['franka_fingertip']],
             # Box
             "box_pos": self._box_state[:, :3],
             "box_quat": self._box_state[:, 3:7],
@@ -390,7 +357,6 @@ class FrankaToy(VecTask):
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         self.gym.refresh_jacobian_tensors(self.sim)
         self.gym.refresh_mass_matrix_tensors(self.sim)
-        self.gym.refresh_net_contact_force_tensor(self.sim)
 
         # Refresh states
         self._update_states()
@@ -400,7 +366,7 @@ class FrankaToy(VecTask):
         distance = torch.norm(self.states["box_pos"][:, :2] - torch.tensor(self._target_pos[:2], device=self.device), dim=-1)
         delta_distance = distance - self.distance_prev
         self.distance_prev = distance
-        reward = -delta_distance/self.dt/self.n_control_loop
+        reward = -delta_distance/self.dt  # Reward is the velocity towards the target
         # Success when the box is close to the target & velocity is zero
         is_terminal = (distance < 0.1) & (torch.norm(self.states["box_vel"][:, :2], dim=-1) < 1e-3)
         reward += torch.where(is_terminal, torch.tensor(100., device=self.device), torch.tensor(0., device=self.device))
@@ -410,18 +376,13 @@ class FrankaToy(VecTask):
     def compute_observations(self):
         self._refresh()
         eef_obs = ["eef_pos", "eef_vel"]
-        if self.obs_force:
-            eef_obs.append("eef_force")
         self.obs_buf = torch.cat([self.states[ob][:, :2] for ob in eef_obs], dim=-1) # Only take x, y components
         box_pos = self.states["box_pos"][:, :2] # Only take x, y components
         box_pos += torch.randn_like(box_pos) * self.box_pos_error_std
         box_orientation_2D = self.states["box_quat"][:, 2:4] # Only take z, w components
-        if self.obs_vel:
-            box_vel = self.states["box_vel"][:, :2] # Only take x, y components
-            box_angular_vel_2D = self.states["box_vel"][:, 5] # Only take z component
-            self.obs_buf = torch.cat([self.obs_buf, box_pos, box_vel, box_orientation_2D, box_angular_vel_2D.unsqueeze(-1)], dim=-1)
-        else:
-            self.obs_buf = torch.cat([self.obs_buf, box_pos, box_orientation_2D], dim=-1)
+        box_vel = self.states["box_vel"][:, :2] # Only take x, y components
+        box_angular_vel_2D = self.states["box_vel"][:, 5] # Only take z component
+        self.obs_buf = torch.cat([self.obs_buf, box_pos, box_vel, box_orientation_2D, box_angular_vel_2D.unsqueeze(-1)], dim=-1)
         return self.obs_buf
 
     def reset_idx(self, env_ids):
@@ -440,9 +401,6 @@ class FrankaToy(VecTask):
         # Set effort control to be 0
         # NOTE: Task takes care of actually propagating these controls in sim using the SimActions API
         self._effort_control[env_ids, :] = torch.zeros_like(pos)
-        self._error[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
-        self._error_dot[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
-        self.x_r_pos_prev[env_ids, :] = torch.zeros((len(env_ids), 2), device=self.device)
 
         # Deploy updates
         multi_env_ids_int32 = self._global_indices[env_ids, 0].flatten()
@@ -563,63 +521,11 @@ class FrankaToy(VecTask):
         is_initial = (self.progress_buf == 0) # At t=0, the states are invalid, so we skip the control step.
         self.actions = actions.clone().to(self.device)
         delta_x_r = self._convert_2D_to_3D(self.actions[:, :2].clone() * 0.2) # Scale the actions by 0.2
-        if self.control_type == "position":
-            x_r = self._delta_pose_to_pose(delta_x_r)
-            for i in range(self.n_control_loop):
-                # Use OSC for position control
-                delta_x_r = self._pose_to_delta_pose(x_r)
-                self._effort_control = self._compute_osc_torques(dpose=delta_x_r) * (1-is_initial.float()).unsqueeze(-1)
-                # Deploy actions
-                self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
-                if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
-                    # step physics and render each frame
-                    for i in range(self.control_freq_inv):
-                        if self.force_render:
-                            self.render()
-                        self.gym.simulate(self.sim)
-                        self._refresh()
-                       
-        elif self.control_type == "admittance":
-            normalized_control_params = (self.actions[:, 2:].clone() + 1.0) / 2
-            min_val = torch.tensor([self.inertia_min, self.stiffness_min], device=self.device)
-            max_val = torch.tensor([self.inertia_max, self.stiffness_max], device=self.device)
-            control_params = min_val * (max_val / min_val) ** normalized_control_params
-            x_r = self._delta_pose_to_pose(delta_x_r)
-            x_d = x_r.clone()
-            x_r_pos = x_r[:, :2].clone() # (num_envs, 2)
-            if self.integration_var == "x_d":
-                error_initial = is_initial | (self.progress_buf == 1)
-                self._error -= (x_r_pos - self.x_r_pos_prev)*(1-error_initial.float()).unsqueeze(-1)
-            self.x_r_pos_prev = x_r_pos
 
-            inertia = control_params[:, 0].clone().unsqueeze(-1)  # (num_envs, 1)
-            stiffness = control_params[:, 1].clone().unsqueeze(-1)  # (num_envs, 1)
-            damping = 2 * torch.sqrt(inertia * stiffness) # (num_envs, 1), Assume critical damping
-            for i in range(self.n_control_loop):
-                force = self.states['eef_force'][:, :2] # (num_envs, 2)
-                # Solve x' = f(x), where x = [dpos, vel] 
-                error_two_dot = (force - damping * self._error_dot - stiffness * self._error) / inertia
-                self._error += self._error_dot * self.dt + error_two_dot * self.dt ** 2 / 2
-                self._error_dot += error_two_dot * self.dt
-                # Use OSC for position control
-                x_d[:, :2] = x_r[:, :2] + self._error
-                delta_x_d = self._pose_to_delta_pose(x_d)
-                self._effort_control = self._compute_osc_torques(dpose=delta_x_d)*(1-is_initial.float()).unsqueeze(-1)
-                # Deploy actions
-                self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
-                if i < self.n_control_loop - 1: # Skip the last step Since the last step will be done in step()
-                    # step physics and render each frame
-                    for i in range(self.control_freq_inv):
-                        if self.force_render:
-                            self.render()
-                        self.gym.simulate(self.sim)
-                        self._refresh()
+        self._effort_control = self._compute_osc_torques(dpose=delta_x_r)*(1-is_initial.float()).unsqueeze(-1)
 
-        elif self.control_type == "osc":
-            self._effort_control = self._compute_osc_torques(dpose=delta_x_r)*(1-is_initial.float()).unsqueeze(-1)
-
-            # Deploy actions
-            self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
+        # Deploy actions
+        self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self._effort_control))
 
     def post_physics_step(self):
         self.progress_buf += 1
